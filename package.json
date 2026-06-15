@@ -14,6 +14,7 @@
   "dependencies": {
     "@circle-fin/developer-controlled-wallets": "^10.3.1",
     "@circle-fin/user-controlled-wallets": "^10.3.1",
+    "@circle-fin/x402-batching": "^2.0.4",
     "@supabase/supabase-js": "^2.105.4",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

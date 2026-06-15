@@ -8,6 +8,7 @@ import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-
 import { createPublicClient, createWalletClient, http, decodeEventLog, keccak256, toHex, parseAbiItem } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arcTestnet } from 'viem/chains';
+import { x402Paywall, x402Info } from './lib/x402.js';
 
 // Prevent unhandled promise rejections from crashing the server
 process.on('unhandledRejection', (reason, promise) => {
@@ -2284,6 +2285,36 @@ app.get('/api/stats', async (req, res) => {
     console.error('stats error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── x402 creator-monetization layer ──────────────────────────────────────────
+// "Forecaster = creator, paid per event." A premium forecast is sold per-read
+// via Circle Gateway batched nanopayments on Arc Testnet. The buyer (human or
+// agent) pays a sub-cent USDC nanopayment that settles to the seller's Arc
+// wallet; the tx is visible on arcscan. See lib/x402.js.
+
+// Public config — free. Useful for the buyer agent, demos and judges.
+app.get('/api/x402/info', x402Info);
+
+// Paywalled premium forecast ($0.001). First paid endpoint of the creator loop.
+app.get('/api/alpha/sample', x402Paywall('$0.001', '/api/alpha/sample', {
+  description: 'Puls premium forecast — sample alpha signal',
+}), (req, res) => {
+  res.json({
+    signal: {
+      market: 'Will BTC close above $100k by 2026-12-31?',
+      stance: 'YES',
+      confidence: 0.62,
+      thesis:
+        'Spot ETF inflows + post-halving supply squeeze outweigh near-term macro drag; '
+        + 'order-flow on Puls skews YES while implied prob lags fundamentals.',
+      edge_bps: 480,
+      horizon: 'Q4 2026',
+    },
+    creator: { handle: 'puls-house', payTo: req.x402?.payTo },
+    payment: req.x402 || null,
+    generatedAt: new Date().toISOString(),
+  });
 });
 
 app.get('/health', (_, res) => res.json({ ok: true }));
