@@ -86,10 +86,18 @@ create table if not exists alpha_unlocks (
   id uuid default gen_random_uuid() primary key,
   user_id text not null,
   signal_id text not null,
+  -- 'pending'  = access reserved, micro-payment submitted but not yet confirmed
+  -- 'confirmed'= payment settled, durable access granted
+  status text not null default 'confirmed',
   amount_usdc numeric not null default 0,
   tx_id text,
   created_at timestamptz default now(),
+  confirmed_at timestamptz,
   unique (user_id, signal_id)
 );
 
 create index if not exists alpha_unlocks_user_idx on alpha_unlocks(user_id);
+
+-- If alpha_unlocks already exists from an earlier deploy, add the new columns:
+alter table alpha_unlocks add column if not exists status text not null default 'confirmed';
+alter table alpha_unlocks add column if not exists confirmed_at timestamptz;
