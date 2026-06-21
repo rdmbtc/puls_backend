@@ -3601,13 +3601,22 @@ async function checkAndResolveMarkets() {
 
   for (const market of marketsToResolve) {
     try {
-      const pmUrl = `https://gamma-api.polymarket.com/markets?slug=${market.slug}`;
-      const res = await fetch(pmUrl);
-      if (!res.ok) continue;
-      
-      const list = await res.json();
-      if (!list || list.length === 0) {
-        // Slug no longer exists on Polymarket → can never auto-resolve.
+      // Gamma's /markets?slug= returns ACTIVE markets only by default, so a
+      // CLOSED/resolved market came back EMPTY — the cron then treated it as
+      // "gone" and ARCHIVED it instead of resolving. Query closed markets first
+      // (to settle them), then fall back to the open query (still-running ones).
+      let list = [];
+      try {
+        const rc = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&closed=true`);
+        if (rc.ok) list = await rc.json();
+        if (!Array.isArray(list) || list.length === 0) {
+          const ro = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}`);
+          if (ro.ok) list = await ro.json();
+        }
+      } catch (e) { console.error(`[resolve] Polymarket fetch failed for ${market.slug}:`, e.message); continue; }
+
+      if (!Array.isArray(list) || list.length === 0) {
+        // Truly gone from Polymarket (neither open nor closed) → can't auto-resolve.
         if (market.deadline < archiveCutoff) await archiveMarket(market.slug, 'slug gone from Polymarket');
         continue;
       }
