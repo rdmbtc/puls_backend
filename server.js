@@ -4333,16 +4333,16 @@ app.post('/api/profile/update', authenticateUser, strictLimiter, async (req, res
 // _2, _3, … add fallbacks tried in order. A provider is skipped unless it has a
 // URL, key AND model. URLs may be a base ("…/v1") — "/chat/completions" is
 // appended automatically when missing. All keys live in .env, never in the repo.
-function buildLlmProviders() {
+function buildLlmProviders(base = 'AGENT_LLM', modelBase = 'AGENT_MODEL') {
   const list = [];
-  // '', _2 … _30 — room for many fallback providers and rotating keys.
-  for (const sfx of ['', ...Array.from({ length: 29 }, (_, i) => `_${i + 2}`)]) {
-    let url = (process.env[`AGENT_LLM_URL${sfx}`] || '').trim();
-    const key = (process.env[`AGENT_LLM_KEY${sfx}`] || '').trim();
-    const model = (process.env[`AGENT_MODEL${sfx}`] || '').trim();
+  // '', _2 … _50 — room for many fallback providers and rotating keys.
+  for (const sfx of ['', ...Array.from({ length: 49 }, (_, i) => `_${i + 2}`)]) {
+    let url = (process.env[`${base}_URL${sfx}`] || '').trim();
+    const key = (process.env[`${base}_KEY${sfx}`] || '').trim();
+    const model = (process.env[`${modelBase}${sfx}`] || '').trim();
     if (!url || !key || !model) continue;
     // Format: explicit env wins, else auto-detect by host.
-    let format = (process.env[`AGENT_LLM_FORMAT${sfx}`] || '').trim().toLowerCase();
+    let format = (process.env[`${base}_FORMAT${sfx}`] || '').trim().toLowerCase();
     if (!format) {
       if (/generativelanguage\.googleapis\.com/i.test(url)) format = 'gemini';
       else if (/api\.cohere\.com/i.test(url)) format = 'cohere';
@@ -4357,6 +4357,12 @@ function buildLlmProviders() {
   return list;
 }
 const LLM_PROVIDERS = buildLlmProviders();
+// Optional separate "heavy" pool of reasoning models for the daily blog
+// analysis — where depth matters and latency doesn't. Configured via
+// AGENT_HEAVY_URL/KEY + AGENT_HEAVY_MODEL (and _2, _3 …). The trading loop never
+// uses these (they'd be slow + emit verbose reasoning, not clean JSON).
+const LLM_HEAVY_PROVIDERS = buildLlmProviders('AGENT_HEAVY', 'AGENT_HEAVY_MODEL');
+const llmHeavyCooldown = new Map();
 const LLM_TIMEOUT_MS = parseInt(process.env.AGENT_LLM_TIMEOUT_MS || '60000', 10);
 const LLM_RETRIES = Math.max(1, parseInt(process.env.AGENT_LLM_RETRIES || '1', 10)); // attempts per provider
 // After a provider hits a rate-limit/quota/overload error, skip it for this
@@ -4369,6 +4375,9 @@ if (LLM_PROVIDERS.length === 0) {
   console.warn('[llm] No agent LLM providers configured (set AGENT_LLM_URL/KEY/MODEL).');
 } else {
   console.log(`[llm] ${LLM_PROVIDERS.length} provider(s): ${LLM_PROVIDERS.map(p => `${p.model}${p.format !== 'openai' ? `(${p.format})` : ''}`).join(' → ')}`);
+}
+if (LLM_HEAVY_PROVIDERS.length) {
+  console.log(`[llm] ${LLM_HEAVY_PROVIDERS.length} heavy provider(s): ${LLM_HEAVY_PROVIDERS.map(p => p.model).join(' → ')}`);
 }
 const IDENTITY_REGISTRY = '0x8004A818BFB912233c491871b3d84c89A494BD9e';
 const REPUTATION_REGISTRY = '0x8004B663056A597Dffe9eCcC1965A193B7388713';
@@ -4525,7 +4534,7 @@ async function llmCompleteOpenAI(provider, messages, signal) {
   }
   const reader = r.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', out = '';
+  let buf = '', out = '', reasoning = '';
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -4539,12 +4548,15 @@ async function llmCompleteOpenAI(provider, messages, signal) {
       if (payload === '[DONE]') continue;
       try {
         const j = JSON.parse(payload);
-        const c = j.choices?.[0]?.delta?.content;
-        if (c) out += c;
+        const d = j.choices?.[0]?.delta;
+        if (d?.content) out += d.content;
+        else if (d?.reasoning_content) reasoning += d.reasoning_content;
       } catch (_) {}
     }
   }
-  return out.trim();
+  // Reasoning models stream their thinking in `reasoning_content` and may emit
+  // no `content` — fall back to the reasoning so the heavy pool isn't empty.
+  return (out.trim() || reasoning.trim());
 }
 
 // Tries each configured provider in priority order (primary → fallbacks) with a
@@ -4553,22 +4565,25 @@ async function llmCompleteOpenAI(provider, messages, signal) {
 // provider FIRST — this lets each swarm agent favour a distinct "brain" while
 // still falling back through the whole pool if it's down. Returns the text.
 async function llmComplete(messages, opts = {}) {
-  if (LLM_PROVIDERS.length === 0) throw new Error('Agent LLM key not configured');
-  let order = LLM_PROVIDERS.map((p, i) => i);
+  const useHeavy = opts.heavy === true && LLM_HEAVY_PROVIDERS.length > 0;
+  const pool = useHeavy ? LLM_HEAVY_PROVIDERS : LLM_PROVIDERS;
+  const cooldown = useHeavy ? llmHeavyCooldown : llmCooldownUntil;
+  if (pool.length === 0) throw new Error('Agent LLM key not configured');
+  let order = pool.map((p, i) => i);
   if (opts.prefer) {
     const want = String(opts.prefer).toLowerCase();
-    const pi = LLM_PROVIDERS.findIndex(p => p.model.toLowerCase().includes(want));
+    const pi = pool.findIndex(p => p.model.toLowerCase().includes(want));
     if (pi > 0) order = [pi, ...order.filter(i => i !== pi)];
   }
   // Skip providers that recently hit a rate-limit/quota error (stops 429 spam,
   // saves CPU, rotates to fresh keys). If everything is cooling down, try the
   // full order anyway rather than hard-failing.
   const nowTs = Date.now();
-  const ready = order.filter((i) => (llmCooldownUntil.get(i) || 0) <= nowTs);
+  const ready = order.filter((i) => (cooldown.get(i) || 0) <= nowTs);
   const tryOrder = ready.length ? ready : order;
   const errors = [];
   for (const idx of tryOrder) {
-    const provider = LLM_PROVIDERS[idx];
+    const provider = pool[idx];
     for (let attempt = 1; attempt <= LLM_RETRIES; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), LLM_TIMEOUT_MS);
@@ -4583,7 +4598,7 @@ async function llmComplete(messages, opts = {}) {
         // Rate-limited / quota / overloaded → cool this provider down so the
         // next calls rotate to a fresh key instead of re-failing here.
         if (/\b(429|503)\b|rate.?limit|quota|cost limit|too many|overloaded|capacity/i.test(reason)) {
-          llmCooldownUntil.set(idx, Date.now() + LLM_COOLDOWN_MS);
+          cooldown.set(idx, Date.now() + LLM_COOLDOWN_MS);
         }
         errors.push(`${provider.model}: ${reason}`);
         console.error(`[llm] provider (${provider.model}) attempt ${attempt}/${LLM_RETRIES} failed: ${reason}`);
