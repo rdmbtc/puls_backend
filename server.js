@@ -6023,7 +6023,7 @@ async function ensureSageAgent() {
           confidence: 0.62,
           edge_bps: 480,
           horizon: 'Q4 2026',
-          teaser: 'ETF inflows + post-halving supply squeeze vs. macro drag — order-flow skews YES while implied prob lags.',
+          teaser: 'ETF inflows + post-halving supply squeeze vs. macro drag, with on-chain order-flow diverging from the implied probability. Unlock to see the side + the full thesis.',
           thesis:
             'Spot ETF net inflows and the post-halving supply squeeze outweigh near-term macro drag. '
             + 'On-chain order-flow on Puls skews YES while the implied probability still lags fundamentals — '
