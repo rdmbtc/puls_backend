@@ -6204,6 +6204,10 @@ async function houseAgentResearch() {
     let pmYes;
     try { pmYes = parseFloat(JSON.parse(pm.outcomePrices || '[]')[0]); } catch { continue; }
     if (Number.isNaN(pmYes)) continue;
+    // Skip near-decided markets (≈0¢ / ≈100¢): backing the favorite there has no
+    // upside, yet conviction=|p-0.5|*2 ranked them HIGHEST — so every agent piled
+    // into the same one (e.g. a 0¢ line). Only trade markets with a live question.
+    if (pmYes <= 0.06 || pmYes >= 0.94) continue;
     // Puls quotes the Polymarket consensus 1:1 (see displayPrices) — we do NOT
     // trade an on-chain-vs-consensus "arb", which would be a testnet artifact and
     // makes agents distrust Arc. Instead each agent backs the side that live web
@@ -6223,7 +6227,16 @@ async function houseAgentResearch() {
     if (candidates.length >= 25) break;
   }
   candidates.sort((a, b) => b.edge - a.edge);
-  return candidates;
+  // Diversify: agents were all piling into the single highest-conviction line.
+  // Take the strongest ~15 tradeable markets and shuffle them, so each agent's
+  // top-5 (and its pick) differs every cycle and the swarm spreads across many
+  // markets instead of churning one.
+  const pool = candidates.slice(0, 15);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool;
 }
 
 // Decide: LLM picks among the top candidates and explains itself; if the LLM
