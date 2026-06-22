@@ -4373,6 +4373,10 @@ const LLM_PROVIDERS = buildLlmProviders();
 const LLM_HEAVY_PROVIDERS = buildLlmProviders('AGENT_HEAVY', 'AGENT_HEAVY_MODEL');
 const llmHeavyCooldown = new Map();
 const LLM_TIMEOUT_MS = parseInt(process.env.AGENT_LLM_TIMEOUT_MS || '60000', 10);
+// Heavy reasoning models (the blog/analysis pool) are large + slow and emit long
+// outputs, so they get a much longer per-attempt timeout (the blog runs in the
+// background, not user-facing). Falls back to the fast pool only if they still fail.
+const LLM_HEAVY_TIMEOUT_MS = parseInt(process.env.AGENT_HEAVY_TIMEOUT_MS || '150000', 10);
 const LLM_RETRIES = Math.max(1, parseInt(process.env.AGENT_LLM_RETRIES || '1', 10)); // attempts per provider
 // After a provider hits a rate-limit/quota/overload error, skip it for this
 // long — stops hammering exhausted keys (frees the 1-vCPU box) and rotates to a
@@ -4595,7 +4599,8 @@ async function llmComplete(messages, opts = {}) {
     const provider = pool[idx];
     for (let attempt = 1; attempt <= LLM_RETRIES; attempt++) {
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), LLM_TIMEOUT_MS);
+      const timeoutMs = useHeavy ? LLM_HEAVY_TIMEOUT_MS : LLM_TIMEOUT_MS;
+      const timer = setTimeout(() => ac.abort(), timeoutMs);
       try {
         const out = await llmCompleteOne(provider, messages, ac.signal);
         clearTimeout(timer);
@@ -4603,7 +4608,7 @@ async function llmComplete(messages, opts = {}) {
         return out;
       } catch (e) {
         clearTimeout(timer);
-        const reason = ac.signal.aborted ? `timeout after ${LLM_TIMEOUT_MS}ms` : (e.message || String(e));
+        const reason = ac.signal.aborted ? `timeout after ${timeoutMs}ms` : (e.message || String(e));
         // Rate-limited / quota / overloaded → cool this provider down so the
         // next calls rotate to a fresh key instead of re-failing here.
         if (/\b(429|503)\b|rate.?limit|quota|cost limit|too many|overloaded|capacity/i.test(reason)) {
