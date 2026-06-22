@@ -5600,6 +5600,156 @@ function broadcastTrade(trade) {
   }
 }
 
+// ── AI Finance Director (x402-paid, portfolio-aware) ─────────────────────────
+// A premium agent that, for an x402 nanopayment, reads the user's whole
+// portfolio (balance + open positions + their own win/loss record) and returns
+// a STRUCTURED, risk-managed basket of +EV predicts sized to their balance —
+// each with a direct app.pulsmarket.tech link. Replaces the old fake Arbitrage
+// preset. (Money-back AgentBond on the basket is Phase B.)
+const DIRECTOR_PRICE_USDC = parseFloat(process.env.DIRECTOR_PRICE_USDC || '0.5');
+
+// Compact snapshot of a user's standing: balance, open positions (on unresolved
+// markets) and win/loss record (on settled markets). Best-effort; never throws.
+async function userPortfolioSnapshot(userId) {
+  const out = { balance: 0, openPositions: [], heldContracts: [], record: { wins: 0, losses: 0, resolved: 0, winRate: null } };
+  try {
+    const wid = await getWalletId(userId);
+    if (wid) { const info = await getWalletInfo(wid); out.balance = parseFloat(info.usdcBalance) || 0; }
+    const trades = await getTrades(userId);
+    const held = new Set();
+    let wins = 0, losses = 0;
+    for (const t of (trades || [])) {
+      if (String(t.state || '').toUpperCase() !== 'COMPLETE') continue;
+      const contract = String(t.market_id || '');
+      if (!contract.startsWith('0x')) continue;
+      const slug = contractToSlugCache.get(contract.toLowerCase());
+      const m = slug ? deployedMarketsCache.get(slug) : null;
+      const isYes = String(t.side).toUpperCase() === 'YES';
+      if (m && m.resolved === true && (m.outcome === true || m.outcome === false)) {
+        if (isYes === (m.outcome === true)) wins++; else losses++;
+      } else {
+        held.add(contract.toLowerCase());
+        if (out.openPositions.length < 12) {
+          out.openPositions.push({ slug: slug || null, side: t.side, title: String(t.question || '').replace(/^🤖 Agent:\s*/, '').trim().slice(0, 80) });
+        }
+      }
+    }
+    out.heldContracts = [...held];
+    out.record.wins = wins; out.record.losses = losses; out.record.resolved = wins + losses;
+    out.record.winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : null;
+  } catch (e) { console.warn('[director] snapshot failed:', e.message); }
+  return out;
+}
+
+// +EV candidate markets the user does NOT already hold.
+async function directorCandidates(snapshot, limit = 10) {
+  const all = await houseAgentResearch();
+  const held = new Set((snapshot.heldContracts || []).map((s) => String(s).toLowerCase()));
+  return (all || []).filter((c) => c.contractAddress && !held.has(String(c.contractAddress).toLowerCase())).slice(0, limit);
+}
+
+// Free teaser: shows what the Director can see (balance, record, how many picks)
+// WITHOUT the picks — the value (the actual portfolio) is behind the paywall.
+app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, async (req, res) => {
+  try {
+    const userId = `supabase_${req.user.id}`;
+    const snapshot = await userPortfolioSnapshot(userId);
+    const cands = await directorCandidates(snapshot, 10);
+    const wr = snapshot.record.winRate;
+    const teaser = `I can see your $${snapshot.balance.toFixed(2)} balance${wr != null ? ` and your ${wr}% win rate (${snapshot.record.wins}-${snapshot.record.losses})` : ''}. I found ${cands.length} +EV market${cands.length === 1 ? '' : 's'} to build you a structured, risk-managed portfolio${snapshot.openPositions.length ? `, and I can hedge your ${snapshot.openPositions.length} open position${snapshot.openPositions.length === 1 ? '' : 's'}` : ''}. Unlock the full plan for $${DIRECTOR_PRICE_USDC.toFixed(2)}.`;
+    res.json({
+      priceUsdc: DIRECTOR_PRICE_USDC,
+      balance: snapshot.balance,
+      winRate: wr,
+      record: snapshot.record,
+      openPositions: snapshot.openPositions.length,
+      candidatePicks: cands.length,
+      teaser,
+    });
+  } catch (e) { console.error('[director] preview error:', e.message); res.status(500).json({ error: e.message }); }
+});
+
+// Paid (x402): the full structured portfolio. Auth FIRST (whose portfolio),
+// then the paywall (settles the nanopayment), then the handler builds the plan.
+app.post('/api/agent/director',
+  authenticateUser, requireVerifiedUser,
+  x402Paywall('$' + DIRECTOR_PRICE_USDC, '/api/agent/director', { description: 'Puls Finance Director — a structured, risk-managed prediction portfolio sized to your balance' }),
+  async (req, res) => {
+    try {
+      const userId = `supabase_${req.user.id}`;
+      const riskProfile = ['safe', 'balanced', 'aggressive'].includes(String(req.body?.riskProfile || '').toLowerCase())
+        ? String(req.body.riskProfile).toLowerCase() : 'balanced';
+      const snapshot = await userPortfolioSnapshot(userId);
+      const cands = await directorCandidates(snapshot, 10);
+      const investable = Math.max(0, snapshot.balance - 0.1);
+      if (!cands.length || investable < 0.1) {
+        return res.json({
+          ok: true, riskProfile, picks: [], totalStakeUsdc: 0,
+          snapshot: { balance: snapshot.balance, winRate: snapshot.record.winRate, record: snapshot.record, openPositions: snapshot.openPositions.length },
+          summary: !cands.length ? 'No markets clear my +EV bar right now — holding cash is the right call. Check back soon.' : 'Your investable balance is too low to size a safe basket — top up and I will build one.',
+          riskNote: 'Prediction markets are uncertain — never stake more than you can lose.',
+          disclaimer: 'Educational, not financial advice. Puls runs on Arc Testnet with test USDC.',
+          payment: req.x402 || null, generatedAt: new Date().toISOString(),
+        });
+      }
+      const sys = `You are the Puls Finance Director, an autonomous portfolio strategist on the Puls prediction market (Arc Testnet, USDC). Build a STRUCTURED, risk-managed portfolio for THIS user using ONLY the candidate markets provided. Honor the risk profile: safe = favour high-probability favourites (high win-rate, smaller edge); aggressive = favour higher-edge / more contrarian calls (lower win-rate, bigger payoff); balanced = a mix. Size each position in USDC from their investable balance, NEVER exceeding it, and keep some dry powder. Tier each pick: "core" (safe anchor), "satellite" (edge play), or "hedge" (offsets the user's existing open exposure). STRICT JSON only: {"summary":"<2-3 sentences addressed to the user, reference their balance/record>","picks":[{"slug":"<one of the candidate slugs>","side":"YES"|"NO","sizeUsdc":<number>,"tier":"core"|"satellite"|"hedge","rationale":"<1 sentence, cite the consensus probability>"}],"expectedWinRate":<integer 0-100>,"riskNote":"<1 honest risk caveat>"}`;
+      const recordLine = snapshot.record.resolved
+        ? `The user's own record so far: ${snapshot.record.wins}-${snapshot.record.losses} (${snapshot.record.winRate}% win rate) — tailor the plan to improve it.`
+        : `The user has no settled trades yet — keep it approachable.`;
+      const openLine = snapshot.openPositions.length
+        ? `User's OPEN positions (consider hedging; do not blindly double up): ${snapshot.openPositions.map((p) => `${p.title} (${p.side})`).join('; ')}.`
+        : 'User has no open positions.';
+      const candText = cands.map((c, i) => `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus ${(c.pmYes * 100).toFixed(0)}¢ YES | leans ${c.side} | conviction ${(c.conviction * 100).toFixed(0)}%`).join('\n');
+      const usr = `Risk profile: ${riskProfile}. Investable balance: $${investable.toFixed(2)} USDC.\n${recordLine}\n${openLine}\n\nCandidate markets:\n${candText}`;
+      let parsed = null;
+      try {
+        const raw = await llmComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], {});
+        parsed = parseLlmJson(raw);
+      } catch (e) { console.error('[director] LLM failed:', e.message); }
+      const bySlug = Object.fromEntries(cands.map((c) => [c.slug, c]));
+      let picks = [];
+      if (parsed && Array.isArray(parsed.picks)) {
+        for (const p of parsed.picks) {
+          const c = bySlug[p.slug];
+          if (!c) continue;
+          const side = ['YES', 'NO'].includes(String(p.side).toUpperCase()) ? String(p.side).toUpperCase() : c.side;
+          let sizeUsdc = Math.max(0, Number(p.sizeUsdc) || 0);
+          sizeUsdc = Math.min(sizeUsdc, investable);
+          sizeUsdc = Math.round(sizeUsdc * 100) / 100;
+          if (sizeUsdc < 0.01) continue;
+          picks.push({
+            slug: c.slug, title: c.question, side, sizeUsdc,
+            consensusYes: Math.round(c.pmYes * 100),
+            tier: ['core', 'satellite', 'hedge'].includes(p.tier) ? p.tier : 'satellite',
+            rationale: formatForApp(String(p.rationale || '').slice(0, 240)),
+            link: `https://app.pulsmarket.tech/m/${c.slug}`,
+          });
+        }
+      }
+      // Never exceed the investable balance: scale the whole basket down if over.
+      let total = picks.reduce((s, p) => s + p.sizeUsdc, 0);
+      if (total > investable && total > 0) {
+        const k = investable / total;
+        picks = picks.map((p) => ({ ...p, sizeUsdc: Math.round(p.sizeUsdc * k * 100) / 100 }));
+        total = picks.reduce((s, p) => s + p.sizeUsdc, 0);
+      }
+      for (const p of picks) p.sizePct = investable > 0 ? Math.round((p.sizeUsdc / investable) * 100) : 0;
+      res.json({
+        ok: true, riskProfile,
+        snapshot: { balance: snapshot.balance, winRate: snapshot.record.winRate, record: snapshot.record, openPositions: snapshot.openPositions.length },
+        summary: parsed?.summary ? formatForApp(String(parsed.summary).slice(0, 600)) : 'Here is a structured, risk-managed basket sized to your balance.',
+        picks,
+        totalStakeUsdc: Math.round(total * 100) / 100,
+        expectedWinRate: Number.isFinite(parsed?.expectedWinRate) ? Math.max(0, Math.min(100, Math.round(parsed.expectedWinRate))) : null,
+        riskNote: parsed?.riskNote ? String(parsed.riskNote).slice(0, 240) : 'Prediction markets are uncertain — never stake more than you can lose.',
+        disclaimer: 'Educational, not financial advice. Puls runs on Arc Testnet with test USDC.',
+        payment: req.x402 || null,
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (e) { console.error('[director] error:', e.message); res.status(500).json({ error: e.message }); }
+  }
+);
+
 // ── Agent Strategies Engine (Arbitrage & DCA) ──
 const agentStrategies = new Map(); // userId -> strategy string ('NONE', 'ARBITRAGE', 'DCA')
 
