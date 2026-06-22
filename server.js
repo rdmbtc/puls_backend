@@ -5090,13 +5090,15 @@ app.post('/api/notifications/register-token', authenticateUser, strictLimiter, a
 // GET /api/notifications
 app.get('/api/notifications', authenticateUser, async (req, res) => {
   try {
-    const { userId } = req.query;
+    const { userId, type } = req.query;
     if (!userId) return res.status(400).json({ error: 'userId required' });
     
-    const { data, error } = await supabase
+    let q = supabase
       .from('notifications')
       .select('*')
-      .eq('user_id', userId)
+      .eq('user_id', userId);
+    if (type) q = q.eq('type', String(type));
+    const { data, error } = await q
       .order('created_at', { ascending: false })
       .limit(50);
       
