@@ -5656,7 +5656,7 @@ app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, as
     const snapshot = await userPortfolioSnapshot(userId);
     const cands = await directorCandidates(snapshot, 10);
     const wr = snapshot.record.winRate;
-    const teaser = `I can see your $${snapshot.balance.toFixed(2)} balance${wr != null ? ` and your ${wr}% win rate (${snapshot.record.wins}-${snapshot.record.losses})` : ''}. I found ${cands.length} +EV market${cands.length === 1 ? '' : 's'} to build you a structured, risk-managed portfolio${snapshot.openPositions.length ? `, and I can hedge your ${snapshot.openPositions.length} open position${snapshot.openPositions.length === 1 ? '' : 's'}` : ''}. Unlock the full plan for $${DIRECTOR_PRICE_USDC.toFixed(2)}.`;
+    const teaser = `I can see your $${snapshot.balance.toFixed(2)} balance${wr != null ? ` and your ${wr}% win rate (${snapshot.record.wins}-${snapshot.record.losses})` : ''}. I found ${cands.length} +EV market${cands.length === 1 ? '' : 's'} to build you a structured, risk-managed portfolio${snapshot.openPositions.length ? `, and I can hedge your ${snapshot.openPositions.length} open position${snapshot.openPositions.length === 1 ? '' : 's'}` : ''}.${DIRECTOR_GUARANTEE_ENABLED ? ' Backed by a money-back guarantee — if my basket loses, I refund your fee on Arc.' : ''} Unlock the full plan for $${DIRECTOR_PRICE_USDC.toFixed(2)}.`;
     res.json({
       priceUsdc: DIRECTOR_PRICE_USDC,
       balance: snapshot.balance,
@@ -5664,6 +5664,7 @@ app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, as
       record: snapshot.record,
       openPositions: snapshot.openPositions.length,
       candidatePicks: cands.length,
+      moneyBack: DIRECTOR_GUARANTEE_ENABLED,
       teaser,
     });
   } catch (e) { console.error('[director] preview error:', e.message); res.status(500).json({ error: e.message }); }
@@ -5756,16 +5757,21 @@ app.post('/api/agent/director',
 // the user's Circle wallet server-side (mirrors signal unlock), then build the
 // plan. Gated by DIRECTOR_PAID_ENABLED (off → free, for demos).
 const DIRECTOR_PAID_ENABLED = String(process.env.DIRECTOR_PAID_ENABLED ?? 'true').toLowerCase() !== 'false';
+// Money-back guarantee: if the recommended basket LOSES once its markets resolve,
+// the Director refunds the fee on Arc (reconcileDirectorPlans, below). Skin in
+// the game. Gated; idempotent; capped.
+const DIRECTOR_GUARANTEE_ENABLED = String(process.env.DIRECTOR_GUARANTEE_ENABLED ?? 'true').toLowerCase() !== 'false';
 app.post('/api/agent/director/order', authenticateUser, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
     const userId = `supabase_${req.user.id}`;
-    let paid = false, txId = null;
+    let paid = false, txId = null, payerAddr = null, payTo = null;
     if (DIRECTOR_PAID_ENABLED) {
-      const payTo = (process.env.X402_SELLER_ADDRESS || '').trim();
+      payTo = (process.env.X402_SELLER_ADDRESS || '').trim();
       if (!payTo) return res.status(503).json({ error: 'Director payments not configured' });
       const wid = await getWalletId(userId);
       if (!wid) return res.status(400).json({ error: 'No wallet' });
       const info = await getWalletInfo(wid);
+      payerAddr = info.address || null;
       if (parseFloat(info.usdcBalance) < DIRECTOR_PRICE_USDC) {
         return res.status(402).json({ error: `Insufficient USDC — need $${DIRECTOR_PRICE_USDC.toFixed(2)} to unlock the Finance Director.` });
       }
@@ -5777,19 +5783,104 @@ app.post('/api/agent/director/order', authenticateUser, requireVerifiedUser, str
           fee: { type: 'level', config: { feeLevel: 'HIGH' } },
         });
         txId = txRes.data?.id || null; paid = true;
-        supabase.from('x402_payments').insert({
-          endpoint: 'director', payer: info.address || null, pay_to: payTo,
-          amount_usdc: DIRECTOR_PRICE_USDC.toString(), network: 'eip155:5042002', gateway_tx: txId,
-          raw: { kind: 'director', user: userId },
-        }).then(({ error }) => { if (error) console.warn('[director] receipt:', error.message); });
       } catch (txErr) {
         console.error('[director] charge failed:', txErr.message);
         return res.status(502).json({ error: 'Payment failed, please try again' });
       }
     }
     const plan = await buildDirectorPlan(userId, req.body?.riskProfile);
-    res.json({ ...plan, paid, txId });
+    // Persist the paid plan inside the x402 receipt's `raw` so the guarantee
+    // reconciler can refund the fee if the recommended basket loses.
+    const guaranteed = paid && DIRECTOR_GUARANTEE_ENABLED && Array.isArray(plan.picks) && plan.picks.length > 0;
+    if (paid) {
+      supabase.from('x402_payments').insert({
+        endpoint: 'director', payer: payerAddr, pay_to: payTo,
+        amount_usdc: DIRECTOR_PRICE_USDC.toString(), network: 'eip155:5042002', gateway_tx: txId,
+        raw: {
+          kind: 'director', user: userId, userAddr: payerAddr,
+          status: guaranteed ? 'open' : 'nopicks',
+          feeUsdc: DIRECTOR_PRICE_USDC, riskProfile: plan.riskProfile,
+          picks: (plan.picks || []).map((p) => ({ slug: p.slug, side: p.side })),
+        },
+      }).then(({ error }) => { if (error) console.warn('[director] receipt:', error.message); });
+    }
+    res.json({ ...plan, paid, txId, guarantee: guaranteed ? { moneyBack: true, feeUsdc: DIRECTOR_PRICE_USDC } : null });
   } catch (e) { console.error('[director] order error:', e.message); res.status(500).json({ error: e.message }); }
+});
+
+// Money-back reconciler: when a paid basket's markets have ALL resolved, settle
+// it. If it lost (more losing picks than winning), refund the fee to the user on
+// Arc — the Director's skin in the game. Decoupled, gated, idempotent, capped.
+async function reconcileDirectorPlans() {
+  if (!DIRECTOR_GUARANTEE_ENABLED || !walletClient) return;
+  try {
+    const { data: rows } = await supabase
+      .from('x402_payments').select('id, raw')
+      .eq('endpoint', 'director').order('created_at', { ascending: true }).limit(300);
+    let processed = 0;
+    for (const row of (rows || [])) {
+      if (processed >= 10) break;
+      const m = row.raw || {};
+      if (m.status !== 'open' || !Array.isArray(m.picks) || !m.picks.length) continue;
+      let wins = 0, losses = 0, unresolved = 0;
+      for (const p of m.picks) {
+        const e = deployedMarketsCache.get(p.slug);
+        if (e && e.resolved === true && (e.outcome === true || e.outcome === false)) {
+          if ((String(p.side).toUpperCase() === 'YES') === (e.outcome === true)) wins++; else losses++;
+        } else unresolved++;
+      }
+      if (unresolved > 0) continue; // wait for the whole basket to settle
+      processed++;
+      const lost = losses > wins;
+      // Reserve before moving money (idempotency: only 'open' plans are acted on).
+      await supabase.from('x402_payments').update({ raw: { ...m, status: 'settling' } }).eq('id', row.id);
+      let refundTx = null;
+      if (lost && m.userAddr && Number(m.feeUsdc) > 0) {
+        try {
+          const amountMicro = BigInt(Math.round(Number(m.feeUsdc) * 1_000_000));
+          const hash = await walletClient.writeContract({
+            address: USDC,
+            abi: [{ name: 'transfer', type: 'function', stateMutability: 'nonpayable', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }] }],
+            functionName: 'transfer', args: [m.userAddr, amountMicro],
+          });
+          await publicClient.waitForTransactionReceipt({ hash });
+          refundTx = hash;
+        } catch (e) {
+          console.error('[director] refund failed, will retry:', e.message);
+          await supabase.from('x402_payments').update({ raw: { ...m, status: 'open' } }).eq('id', row.id);
+          continue;
+        }
+      }
+      await supabase.from('x402_payments')
+        .update({ raw: { ...m, status: lost ? 'refunded' : 'won', wins, losses, refundTx, settledAt: new Date().toISOString() } })
+        .eq('id', row.id);
+      if (lost && refundTx && m.user) {
+        await supabase.from('notifications').insert({
+          user_id: m.user, title: 'Finance Director refund', type: 'agent_decision', read: false,
+          message: JSON.stringify({ action: 'director_refund', agentName: 'Finance Director', amount: m.feeUsdc, txHash: refundTx, reasoning: `My basket came up short (${wins}-${losses}). As promised, I refunded your $${Number(m.feeUsdc).toFixed(2)} fee — settled on Arc.` }),
+        });
+      }
+      console.log(`[director] plan ${row.id} settled: ${lost ? 'REFUNDED' : 'won'} (${wins}-${losses})${refundTx ? ' tx ' + refundTx : ''}`);
+    }
+  } catch (e) { console.error('[director] reconcile error:', e.message); }
+}
+setInterval(reconcileDirectorPlans, 11 * 60 * 1000);
+
+// Director track record (clients won vs refunded) — social proof for the paid agent.
+app.get('/api/agent/director/record', async (_req, res) => {
+  try {
+    const { data: rows } = await supabase.from('x402_payments').select('raw').eq('endpoint', 'director').limit(1000);
+    let issued = 0, won = 0, refunded = 0, refundedUsdc = 0, open = 0;
+    for (const r of (rows || [])) {
+      const m = r.raw || {};
+      if (m.kind !== 'director') continue;
+      issued++;
+      if (m.status === 'won') won++;
+      else if (m.status === 'refunded') { refunded++; refundedUsdc += Number(m.feeUsdc) || 0; }
+      else if (m.status === 'open' || m.status === 'settling') open++;
+    }
+    res.json({ issued, settled: won + refunded, won, refunded, refundedUsdc: Math.round(refundedUsdc * 100) / 100, open, moneyBack: DIRECTOR_GUARANTEE_ENABLED });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Agent Strategies Engine (Arbitrage & DCA) ──
