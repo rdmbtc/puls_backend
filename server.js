@@ -5719,7 +5719,7 @@ async function buildDirectorPlan(userId, riskProfile) {
         consensusYes: Math.round(c.pmYes * 100),
         tier: ['core', 'satellite', 'hedge'].includes(p.tier) ? p.tier : 'satellite',
         rationale: formatForApp(String(p.rationale || '').slice(0, 240)),
-        link: `https://app.pulsmarket.tech/m/${c.slug}`,
+        link: `https://app.pulsmarket.tech/?m=${c.slug}`,
       });
     }
   }
