@@ -4374,9 +4374,11 @@ const LLM_HEAVY_PROVIDERS = buildLlmProviders('AGENT_HEAVY', 'AGENT_HEAVY_MODEL'
 const llmHeavyCooldown = new Map();
 const LLM_TIMEOUT_MS = parseInt(process.env.AGENT_LLM_TIMEOUT_MS || '60000', 10);
 // Heavy reasoning models (the blog/analysis pool) are large + slow and emit long
-// outputs, so they get a much longer per-attempt timeout (the blog runs in the
-// background, not user-facing). Falls back to the fast pool only if they still fail.
-const LLM_HEAVY_TIMEOUT_MS = parseInt(process.env.AGENT_HEAVY_TIMEOUT_MS || '150000', 10);
+// outputs, so they get a very long per-attempt timeout — the blog runs in the
+// background and isn't user-facing, so we let the big reasoning models take as
+// long as they need (10 min default). Falls back to the fast pool only if they
+// still fail. Tunable via AGENT_HEAVY_TIMEOUT_MS.
+const LLM_HEAVY_TIMEOUT_MS = parseInt(process.env.AGENT_HEAVY_TIMEOUT_MS || '600000', 10);
 const LLM_RETRIES = Math.max(1, parseInt(process.env.AGENT_LLM_RETRIES || '1', 10)); // attempts per provider
 // After a provider hits a rate-limit/quota/overload error, skip it for this
 // long — stops hammering exhausted keys (frees the 1-vCPU box) and rotates to a
