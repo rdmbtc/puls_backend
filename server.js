@@ -5671,84 +5671,126 @@ app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, as
 
 // Paid (x402): the full structured portfolio. Auth FIRST (whose portfolio),
 // then the paywall (settles the nanopayment), then the handler builds the plan.
+// Shared plan builder: portfolio snapshot → +EV candidates → LLM structured
+// basket sized to the user's investable balance. Returns the plan (no payment).
+async function buildDirectorPlan(userId, riskProfile) {
+  const rp = ['safe', 'balanced', 'aggressive'].includes(String(riskProfile || '').toLowerCase())
+    ? String(riskProfile).toLowerCase() : 'balanced';
+  const snapshot = await userPortfolioSnapshot(userId);
+  const cands = await directorCandidates(snapshot, 10);
+  const investable = Math.max(0, snapshot.balance - 0.1);
+  const snap = { balance: snapshot.balance, winRate: snapshot.record.winRate, record: snapshot.record, openPositions: snapshot.openPositions.length };
+  const disclaimer = 'Educational, not financial advice. Puls runs on Arc Testnet with test USDC.';
+  if (!cands.length || investable < 0.1) {
+    return {
+      ok: true, riskProfile: rp, snapshot: snap, picks: [], totalStakeUsdc: 0,
+      summary: !cands.length ? 'No markets clear my +EV bar right now — holding cash is the right call. Check back soon.' : 'Your investable balance is too low to size a safe basket — top up and I will build one.',
+      riskNote: 'Prediction markets are uncertain — never stake more than you can lose.',
+      expectedWinRate: null, disclaimer, generatedAt: new Date().toISOString(),
+    };
+  }
+  const sys = `You are the Puls Finance Director, an autonomous portfolio strategist on the Puls prediction market (Arc Testnet, USDC). Build a STRUCTURED, risk-managed portfolio for THIS user using ONLY the candidate markets provided. Honor the risk profile: safe = favour high-probability favourites (high win-rate, smaller edge); aggressive = favour higher-edge / more contrarian calls (lower win-rate, bigger payoff); balanced = a mix. Size each position in USDC from their investable balance, NEVER exceeding it, and keep some dry powder. Tier each pick: "core" (safe anchor), "satellite" (edge play), or "hedge" (offsets the user's existing open exposure). STRICT JSON only: {"summary":"<2-3 sentences addressed to the user, reference their balance/record>","picks":[{"slug":"<one of the candidate slugs>","side":"YES"|"NO","sizeUsdc":<number>,"tier":"core"|"satellite"|"hedge","rationale":"<1 sentence, cite the consensus probability>"}],"expectedWinRate":<integer 0-100>,"riskNote":"<1 honest risk caveat>"}`;
+  const recordLine = snapshot.record.resolved
+    ? `The user's own record so far: ${snapshot.record.wins}-${snapshot.record.losses} (${snapshot.record.winRate}% win rate) — tailor the plan to improve it.`
+    : `The user has no settled trades yet — keep it approachable.`;
+  const openLine = snapshot.openPositions.length
+    ? `User's OPEN positions (consider hedging; do not blindly double up): ${snapshot.openPositions.map((p) => `${p.title} (${p.side})`).join('; ')}.`
+    : 'User has no open positions.';
+  const candText = cands.map((c, i) => `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus ${(c.pmYes * 100).toFixed(0)}¢ YES | leans ${c.side} | conviction ${(c.conviction * 100).toFixed(0)}%`).join('\n');
+  const usr = `Risk profile: ${rp}. Investable balance: $${investable.toFixed(2)} USDC.\n${recordLine}\n${openLine}\n\nCandidate markets:\n${candText}`;
+  let parsed = null;
+  try {
+    const raw = await llmComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], {});
+    parsed = parseLlmJson(raw);
+  } catch (e) { console.error('[director] LLM failed:', e.message); }
+  const bySlug = Object.fromEntries(cands.map((c) => [c.slug, c]));
+  let picks = [];
+  if (parsed && Array.isArray(parsed.picks)) {
+    for (const p of parsed.picks) {
+      const c = bySlug[p.slug];
+      if (!c) continue;
+      const side = ['YES', 'NO'].includes(String(p.side).toUpperCase()) ? String(p.side).toUpperCase() : c.side;
+      let sizeUsdc = Math.max(0, Number(p.sizeUsdc) || 0);
+      sizeUsdc = Math.min(sizeUsdc, investable);
+      sizeUsdc = Math.round(sizeUsdc * 100) / 100;
+      if (sizeUsdc < 0.01) continue;
+      picks.push({
+        slug: c.slug, title: c.question, side, sizeUsdc,
+        consensusYes: Math.round(c.pmYes * 100),
+        tier: ['core', 'satellite', 'hedge'].includes(p.tier) ? p.tier : 'satellite',
+        rationale: formatForApp(String(p.rationale || '').slice(0, 240)),
+        link: `https://app.pulsmarket.tech/m/${c.slug}`,
+      });
+    }
+  }
+  let total = picks.reduce((s, p) => s + p.sizeUsdc, 0);
+  if (total > investable && total > 0) {
+    const k = investable / total;
+    picks = picks.map((p) => ({ ...p, sizeUsdc: Math.round(p.sizeUsdc * k * 100) / 100 }));
+    total = picks.reduce((s, p) => s + p.sizeUsdc, 0);
+  }
+  for (const p of picks) p.sizePct = investable > 0 ? Math.round((p.sizeUsdc / investable) * 100) : 0;
+  return {
+    ok: true, riskProfile: rp, snapshot: snap,
+    summary: parsed?.summary ? formatForApp(String(parsed.summary).slice(0, 600)) : 'Here is a structured, risk-managed basket sized to your balance.',
+    picks, totalStakeUsdc: Math.round(total * 100) / 100,
+    expectedWinRate: Number.isFinite(parsed?.expectedWinRate) ? Math.max(0, Math.min(100, Math.round(parsed.expectedWinRate))) : null,
+    riskNote: parsed?.riskNote ? String(parsed.riskNote).slice(0, 240) : 'Prediction markets are uncertain — never stake more than you can lose.',
+    disclaimer, generatedAt: new Date().toISOString(),
+  };
+}
+
+// External agents / SDK pay with a client-signed x402 nanopayment.
 app.post('/api/agent/director',
   authenticateUser, requireVerifiedUser,
   x402Paywall('$' + DIRECTOR_PRICE_USDC, '/api/agent/director', { description: 'Puls Finance Director — a structured, risk-managed prediction portfolio sized to your balance' }),
   async (req, res) => {
     try {
-      const userId = `supabase_${req.user.id}`;
-      const riskProfile = ['safe', 'balanced', 'aggressive'].includes(String(req.body?.riskProfile || '').toLowerCase())
-        ? String(req.body.riskProfile).toLowerCase() : 'balanced';
-      const snapshot = await userPortfolioSnapshot(userId);
-      const cands = await directorCandidates(snapshot, 10);
-      const investable = Math.max(0, snapshot.balance - 0.1);
-      if (!cands.length || investable < 0.1) {
-        return res.json({
-          ok: true, riskProfile, picks: [], totalStakeUsdc: 0,
-          snapshot: { balance: snapshot.balance, winRate: snapshot.record.winRate, record: snapshot.record, openPositions: snapshot.openPositions.length },
-          summary: !cands.length ? 'No markets clear my +EV bar right now — holding cash is the right call. Check back soon.' : 'Your investable balance is too low to size a safe basket — top up and I will build one.',
-          riskNote: 'Prediction markets are uncertain — never stake more than you can lose.',
-          disclaimer: 'Educational, not financial advice. Puls runs on Arc Testnet with test USDC.',
-          payment: req.x402 || null, generatedAt: new Date().toISOString(),
-        });
-      }
-      const sys = `You are the Puls Finance Director, an autonomous portfolio strategist on the Puls prediction market (Arc Testnet, USDC). Build a STRUCTURED, risk-managed portfolio for THIS user using ONLY the candidate markets provided. Honor the risk profile: safe = favour high-probability favourites (high win-rate, smaller edge); aggressive = favour higher-edge / more contrarian calls (lower win-rate, bigger payoff); balanced = a mix. Size each position in USDC from their investable balance, NEVER exceeding it, and keep some dry powder. Tier each pick: "core" (safe anchor), "satellite" (edge play), or "hedge" (offsets the user's existing open exposure). STRICT JSON only: {"summary":"<2-3 sentences addressed to the user, reference their balance/record>","picks":[{"slug":"<one of the candidate slugs>","side":"YES"|"NO","sizeUsdc":<number>,"tier":"core"|"satellite"|"hedge","rationale":"<1 sentence, cite the consensus probability>"}],"expectedWinRate":<integer 0-100>,"riskNote":"<1 honest risk caveat>"}`;
-      const recordLine = snapshot.record.resolved
-        ? `The user's own record so far: ${snapshot.record.wins}-${snapshot.record.losses} (${snapshot.record.winRate}% win rate) — tailor the plan to improve it.`
-        : `The user has no settled trades yet — keep it approachable.`;
-      const openLine = snapshot.openPositions.length
-        ? `User's OPEN positions (consider hedging; do not blindly double up): ${snapshot.openPositions.map((p) => `${p.title} (${p.side})`).join('; ')}.`
-        : 'User has no open positions.';
-      const candText = cands.map((c, i) => `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus ${(c.pmYes * 100).toFixed(0)}¢ YES | leans ${c.side} | conviction ${(c.conviction * 100).toFixed(0)}%`).join('\n');
-      const usr = `Risk profile: ${riskProfile}. Investable balance: $${investable.toFixed(2)} USDC.\n${recordLine}\n${openLine}\n\nCandidate markets:\n${candText}`;
-      let parsed = null;
-      try {
-        const raw = await llmComplete([{ role: 'system', content: sys }, { role: 'user', content: usr }], {});
-        parsed = parseLlmJson(raw);
-      } catch (e) { console.error('[director] LLM failed:', e.message); }
-      const bySlug = Object.fromEntries(cands.map((c) => [c.slug, c]));
-      let picks = [];
-      if (parsed && Array.isArray(parsed.picks)) {
-        for (const p of parsed.picks) {
-          const c = bySlug[p.slug];
-          if (!c) continue;
-          const side = ['YES', 'NO'].includes(String(p.side).toUpperCase()) ? String(p.side).toUpperCase() : c.side;
-          let sizeUsdc = Math.max(0, Number(p.sizeUsdc) || 0);
-          sizeUsdc = Math.min(sizeUsdc, investable);
-          sizeUsdc = Math.round(sizeUsdc * 100) / 100;
-          if (sizeUsdc < 0.01) continue;
-          picks.push({
-            slug: c.slug, title: c.question, side, sizeUsdc,
-            consensusYes: Math.round(c.pmYes * 100),
-            tier: ['core', 'satellite', 'hedge'].includes(p.tier) ? p.tier : 'satellite',
-            rationale: formatForApp(String(p.rationale || '').slice(0, 240)),
-            link: `https://app.pulsmarket.tech/m/${c.slug}`,
-          });
-        }
-      }
-      // Never exceed the investable balance: scale the whole basket down if over.
-      let total = picks.reduce((s, p) => s + p.sizeUsdc, 0);
-      if (total > investable && total > 0) {
-        const k = investable / total;
-        picks = picks.map((p) => ({ ...p, sizeUsdc: Math.round(p.sizeUsdc * k * 100) / 100 }));
-        total = picks.reduce((s, p) => s + p.sizeUsdc, 0);
-      }
-      for (const p of picks) p.sizePct = investable > 0 ? Math.round((p.sizeUsdc / investable) * 100) : 0;
-      res.json({
-        ok: true, riskProfile,
-        snapshot: { balance: snapshot.balance, winRate: snapshot.record.winRate, record: snapshot.record, openPositions: snapshot.openPositions.length },
-        summary: parsed?.summary ? formatForApp(String(parsed.summary).slice(0, 600)) : 'Here is a structured, risk-managed basket sized to your balance.',
-        picks,
-        totalStakeUsdc: Math.round(total * 100) / 100,
-        expectedWinRate: Number.isFinite(parsed?.expectedWinRate) ? Math.max(0, Math.min(100, Math.round(parsed.expectedWinRate))) : null,
-        riskNote: parsed?.riskNote ? String(parsed.riskNote).slice(0, 240) : 'Prediction markets are uncertain — never stake more than you can lose.',
-        disclaimer: 'Educational, not financial advice. Puls runs on Arc Testnet with test USDC.',
-        payment: req.x402 || null,
-        generatedAt: new Date().toISOString(),
-      });
+      const plan = await buildDirectorPlan(`supabase_${req.user.id}`, req.body?.riskProfile);
+      res.json({ ...plan, payment: req.x402 || null });
     } catch (e) { console.error('[director] error:', e.message); res.status(500).json({ error: e.message }); }
   }
 );
+
+// In-app path: developer-controlled wallets can't client-sign x402, so we charge
+// the user's Circle wallet server-side (mirrors signal unlock), then build the
+// plan. Gated by DIRECTOR_PAID_ENABLED (off → free, for demos).
+const DIRECTOR_PAID_ENABLED = String(process.env.DIRECTOR_PAID_ENABLED ?? 'true').toLowerCase() !== 'false';
+app.post('/api/agent/director/order', authenticateUser, requireVerifiedUser, strictLimiter, async (req, res) => {
+  try {
+    const userId = `supabase_${req.user.id}`;
+    let paid = false, txId = null;
+    if (DIRECTOR_PAID_ENABLED) {
+      const payTo = (process.env.X402_SELLER_ADDRESS || '').trim();
+      if (!payTo) return res.status(503).json({ error: 'Director payments not configured' });
+      const wid = await getWalletId(userId);
+      if (!wid) return res.status(400).json({ error: 'No wallet' });
+      const info = await getWalletInfo(wid);
+      if (parseFloat(info.usdcBalance) < DIRECTOR_PRICE_USDC) {
+        return res.status(402).json({ error: `Insufficient USDC — need $${DIRECTOR_PRICE_USDC.toFixed(2)} to unlock the Finance Director.` });
+      }
+      try {
+        const amountMicro = Math.round(DIRECTOR_PRICE_USDC * 1_000_000).toString();
+        const txRes = await circle.createContractExecutionTransaction({
+          walletId: wid, contractAddress: USDC,
+          abiFunctionSignature: 'transfer(address,uint256)', abiParameters: [payTo, amountMicro],
+          fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+        });
+        txId = txRes.data?.id || null; paid = true;
+        supabase.from('x402_payments').insert({
+          endpoint: 'director', payer: info.address || null, pay_to: payTo,
+          amount_usdc: DIRECTOR_PRICE_USDC.toString(), network: 'eip155:5042002', gateway_tx: txId,
+          raw: { kind: 'director', user: userId },
+        }).then(({ error }) => { if (error) console.warn('[director] receipt:', error.message); });
+      } catch (txErr) {
+        console.error('[director] charge failed:', txErr.message);
+        return res.status(502).json({ error: 'Payment failed, please try again' });
+      }
+    }
+    const plan = await buildDirectorPlan(userId, req.body?.riskProfile);
+    res.json({ ...plan, paid, txId });
+  } catch (e) { console.error('[director] order error:', e.message); res.status(500).json({ error: e.message }); }
+});
 
 // ── Agent Strategies Engine (Arbitrage & DCA) ──
 const agentStrategies = new Map(); // userId -> strategy string ('NONE', 'ARBITRAGE', 'DCA')
