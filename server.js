@@ -23,7 +23,7 @@ import { registerSwap } from './lib/swap.js';
 import { registerBlog } from './lib/blog.js';
 import { registerAgentOracle } from './lib/agent_oracle.js';
 import { researchQuestion } from './lib/agent_research.js';
-import { registerSwarm } from './lib/agent_swarm.js';
+import { registerSwarm, buildSwarmRoster } from './lib/agent_swarm.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 
@@ -3127,6 +3127,8 @@ registerAgentBond(app, {
   publicClient,
   keccak256,
   toHex,
+  contractToSlugCache,
+  deployedMarketsCache,
 });
 
 // ── Token swap (Circle App Kit) — USDC <-> EURC on Arc ────────────────────────
@@ -4098,13 +4100,12 @@ async function updateLeaderboard() {
           }
         }
         
-        // Prefer realized win rate once enough markets have resolved;
-        // fall back to mark-to-market so the leaderboard isn't all 0%.
-        const winRate = resolvedMarketsCount >= 3
+        // Realized-only win rate — consistent with the realized-only PnL above.
+        // If no markets resolved yet, show 0% (honest) rather than a mark-to-market
+        // guess that can diverge wildly from the PnL number.
+        const winRate = resolvedMarketsCount > 0
           ? (winningMarketsCount / resolvedMarketsCount) * 100
-          : marketsTradedCount > 0
-            ? (profitableMarketsCount / marketsTradedCount) * 100
-            : 0;
+          : 0;
         
         // Ensure profile exists (gracefully skip if profiles table missing)
         try {
@@ -4165,6 +4166,24 @@ async function updateLeaderboard() {
     for (let __i = 0; __i < __lbEntries.length; __i += __LB_CONC) {
       await Promise.all(__lbEntries.slice(__i, __i + __LB_CONC).map(__computeUser));
     }
+
+    // Seed every known agent into the leaderboard so they ALWAYS appear in /versus
+    // and the Creators board — even if they haven't traded yet. Existing computed
+    // stats (set above) take precedence; this only fills in the gaps.
+    const __zeroEntry = (uid) => ({
+      user_id: uid, is_agent: true, volume: 0, pnl: 0,
+      trades_count: 0, win_rate: 0, updated_at: new Date().toISOString(),
+    });
+    try {
+      const roster = buildSwarmRoster();
+      for (const a of roster) {
+        if (!leaderboardStats.has(a.user)) leaderboardStats.set(a.user, __zeroEntry(a.user));
+      }
+      // House Pulse + Sage — use literal strings (safe regardless of const TDZ)
+      if (!leaderboardStats.has('house_pulse')) leaderboardStats.set('house_pulse', __zeroEntry('house_pulse'));
+      if (!leaderboardStats.has('agent_sage')) leaderboardStats.set('agent_sage', __zeroEntry('agent_sage'));
+    } catch (e) { console.warn('[leaderboard] roster seed error:', e.message); }
+
     leaderboardCache.clear(); // serve fresh stats promptly
     console.log(`Leaderboard updated successfully (${leaderboardStats.size} traders).`);
   } catch (e) {
