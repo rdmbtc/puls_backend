@@ -4968,6 +4968,83 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
 });
 
 // Chat with the agent. The LLM returns a structured intent; the backend validates
+// The personal "My Agent" can BUY a signal on request: it pays the creator a
+// real USDC nanopayment from its OWN wallet (agent→creator x402 on Arc) and
+// returns the thesis. Picks the best buyable signal (most-unlocked, freshest);
+// skips its own, already-bought, over-budget, and resolved-market (stale) ones.
+async function buySignalForUserAgent(userId, agent, query) {
+  const agentUserId = `agent_${userId}`;
+  const remaining = parseFloat(agent.balance) || 0;
+  const { data: rows } = await supabase
+    .from('creator_signals')
+    .select('id, creator_user_id, title, market_question, market_slug, stance, thesis, price_usdc, unlocks_count, revenue_usdc, created_at')
+    .eq('status', 'published')
+    .neq('creator_user_id', agentUserId)
+    .order('created_at', { ascending: false })
+    .limit(40);
+  if (!rows || !rows.length) return { ok: false, reason: 'There are no published signals on the marketplace yet.' };
+  let owned = new Set();
+  try {
+    const { data: mine } = await supabase.from('signal_unlocks')
+      .select('signal_id').eq('user_id', agentUserId).in('signal_id', rows.map((r) => r.id));
+    owned = new Set((mine || []).map((r) => r.signal_id));
+  } catch (_) {}
+  // Drop signals whose market already resolved (stale alpha — don't buy it).
+  const slugs = [...new Set(rows.map((r) => r.market_slug).filter(Boolean))];
+  const resolved = new Set();
+  try {
+    for (let i = 0; i < slugs.length; i += 100) {
+      const { data: dm } = await supabase.from('deployed_markets')
+        .select('slug, resolved').in('slug', slugs.slice(i, i + 100));
+      for (const m of dm || []) if (m.resolved === true) resolved.add(m.slug);
+    }
+  } catch (_) {}
+  let cand = rows.filter((r) => !owned.has(r.id)
+    && (Number(r.price_usdc) || 0) <= remaining
+    && !(r.market_slug && resolved.has(r.market_slug)));
+  if (!cand.length) return { ok: false, reason: 'No buyable signals right now — all already bought, over my budget, or their markets have resolved.' };
+  const q = String(query || '').trim().toLowerCase();
+  if (q && !['top', 'best', 'any', 'a', 'the', 'one', 'signal', 'alpha', 'forecast'].includes(q)) {
+    const matched = cand.filter((r) => `${r.title} ${r.market_question || ''}`.toLowerCase().includes(q));
+    if (matched.length) cand = matched;
+  }
+  cand.sort((a, b) => (b.unlocks_count ?? 0) - (a.unlocks_count ?? 0)
+    || (new Date(b.created_at) - new Date(a.created_at)));
+  const signal = cand[0];
+  let creatorWalletId = await getWalletId(signal.creator_user_id);
+  if (!creatorWalletId && /agent/i.test(signal.creator_user_id)) creatorWalletId = await getWalletId(`agent_${signal.creator_user_id}`);
+  const creatorInfo = creatorWalletId ? await getWalletInfo(creatorWalletId) : null;
+  const toAddr = creatorInfo?.address || (signal.creator_user_id.startsWith('eth_') ? signal.creator_user_id.slice(4) : null);
+  if (!toAddr) return { ok: false, reason: 'That signal’s creator has no payout wallet yet — try another.' };
+  const price = Number(signal.price_usdc) || 0.001;
+  let txId = null;
+  try {
+    const tx = await circle.createContractExecutionTransaction({
+      walletId: agent.walletId, contractAddress: USDC,
+      abiFunctionSignature: 'transfer(address,uint256)',
+      abiParameters: [toAddr, String(Math.round(price * 1_000_000))],
+      fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+    });
+    txId = tx.data?.id || null;
+  } catch (e) {
+    return { ok: false, reason: `Payment failed: ${e.message}` };
+  }
+  supabase.from('signal_unlocks').insert({
+    user_id: agentUserId, signal_id: signal.id, status: 'confirmed',
+    amount_usdc: price, tx_id: txId, confirmed_at: new Date().toISOString(),
+  }).then(({ error }) => { if (error && !String(error.message).includes('duplicate')) console.warn('[agent/chat] unlock insert:', error.message); });
+  supabase.from('creator_signals').update({
+    unlocks_count: (signal.unlocks_count ?? 0) + 1,
+    revenue_usdc: Number(signal.revenue_usdc ?? 0) + price,
+  }).eq('id', signal.id).then(() => {});
+  supabase.from('x402_payments').insert({
+    endpoint: 'signal_unlock', payer: agent.address || null, pay_to: toAddr,
+    amount_usdc: price.toString(), network: 'eip155:5042002', gateway_tx: txId,
+    raw: { kind: 'agent_buy_signal', agent: agentUserId, counterparty: signal.creator_user_id, signalId: signal.id },
+  }).then(({ error }) => { if (error) console.warn('[agent/chat] x402 receipt:', error.message); });
+  return { ok: true, signal, price, txId };
+}
+
 // budget + market and executes the buy autonomously from the agent wallet.
 app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
@@ -5025,6 +5102,8 @@ ${marketLines || '(none available)'}
 ${research.brief ? `\nLive web research for context (base your reasoning on this, cite it in your reply if relevant):\n${research.brief}\n` : ''}
 When the user wants you to buy, pick the most relevant market and respond with ONE line of JSON only:
 {"action":"buy","slug":"<exact slug from the list>","side":"YES|NO","usdcAmount":<number <= ${remaining.toFixed(2)}>,"reply":"<short explanation of your pick, grounded in the research>"}
+When the user wants to BUY or UNLOCK a SIGNAL / alpha / forecast (premium analysis from another forecaster — NOT a market trade; e.g. "buy the top signal", "unlock some alpha", "buy a signal about bitcoin"), respond:
+{"action":"buy_signal","query":"<topic keywords, or 'top' for the best one>","reply":"<short explanation>"}
 Otherwise respond: {"action":"none","reply":"<your message, informed by the research>"}
 Never exceed your budget. Prefer markets marked [ready]. Output ONLY the JSON object.`;
 
@@ -5043,7 +5122,17 @@ Never exceed your budget. Prefer markets marked [ready]. Output ONLY the JSON ob
 
     // Validate + execute autonomously within budget.
     let trade = null;
+    let signalBought = null;
     let spentNow = 0;
+    // Robustness: a market "buy" whose slug isn't a real market but clearly means
+    // a SIGNAL → reroute to buy_signal (fixes "buy the top signal" being read as a
+    // market named "top signal").
+    if (intent.action === 'buy' && intent.slug && !feedBySlug[intent.slug]
+        && !deployedMarketsCache.has(intent.slug)
+        && /signal|alpha|forecast/i.test(`${intent.slug} ${message}`)) {
+      intent.action = 'buy_signal';
+      intent.query = intent.query || intent.slug;
+    }
     if (intent.action === 'buy') {
       const slug = intent.slug;
       const amount = parseFloat(intent.usdcAmount);
@@ -5125,9 +5214,26 @@ Never exceed your budget. Prefer markets marked [ready]. Output ONLY the JSON ob
           intent.reply = `Trade failed: ${e.message}`;
         }
       }
+    } else if (intent.action === 'buy_signal') {
+      if (remaining < 0.001) {
+        intent.reply = `I don't have the budget to buy a signal — my balance is ${remaining.toFixed(3)} USDC. Fund me and I'll grab the best alpha.`;
+      } else {
+        const r = await buySignalForUserAgent(userId, agent, intent.query || intent.slug || '');
+        if (!r.ok) {
+          intent.reply = r.reason || "I couldn't buy a signal right now.";
+        } else {
+          const s = r.signal;
+          spentNow = r.price;
+          const who = (String(s.creator_user_id || '').replace(/^agent_(swarm_)?/, '').replace(/^./, (c) => c.toUpperCase())) || 'a forecaster';
+          const stance = s.stance ? ` — calls ${s.stance}` : '';
+          intent.reply = `Bought "${s.title}"${stance} for $${r.price.toFixed(3)} from ${who}, paid on Arc (x402).\n\n${(s.thesis || '').trim()}${s.market_question ? `\n\nMarket: ${s.market_question}` : ''}`;
+          signalBought = { id: s.id, title: s.title, price: r.price, txId: r.txId, stance: s.stance || null, creator: s.creator_user_id };
+          recordAgentReputation(`agent_${userId}`, agent.address, 88, 'bought_signal').catch(() => {});
+        }
+      }
     }
 
-    res.json({ reply: formatForApp(intent.reply) || 'Done.', trade, remaining: Math.max(0, remaining - spentNow), reputation: agentRepCount.get(`agent_${userId}`) ?? 0, sources: (research.sources || []).slice(0, 3) });
+    res.json({ reply: formatForApp(intent.reply) || 'Done.', trade, signal: signalBought, remaining: Math.max(0, remaining - spentNow), reputation: agentRepCount.get(`agent_${userId}`) ?? 0, sources: (research.sources || []).slice(0, 3) });
   } catch (e) {
     console.error('agent chat error:', e.message);
     res.status(500).json({ error: e.message });
