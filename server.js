@@ -2823,9 +2823,12 @@ app.get('/api/stats', async (req, res) => {
       if (page.length < 1000) break;
     }
     const r2 = (n) => Math.round(n * 100) / 100;
+    const organicTrades = Math.max(0, tradeCount - seedTrades);
     const data = {
-      trades: tradeCount,
-      volumeUsdc: r2(volumeUsdc),
+      trades: organicTrades, // organic = real agents + humans; seeded-liquidity wallets excluded
+      volumeUsdc: r2(volumeUsdc - seedVolumeUsdc),
+      totalTradesOnChain: tradeCount, // raw on-chain incl. seeded liquidity (full transparency)
+      totalVolumeUsdc: r2(volumeUsdc),
       marketsDeployed: marketsRes.count ?? 0,
       marketsResolved: resolvedRes.count ?? 0,
       // Traction snapshot (verifiable, no PII) — surfaced on the public /stats page.
