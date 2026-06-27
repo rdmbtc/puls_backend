@@ -2783,6 +2783,8 @@ app.get('/api/stats', async (req, res) => {
     let volumeUsdc = 0;
     let agentTrades = 0;
     let agentVolumeUsdc = 0;
+    let seedTrades = 0;
+    let seedVolumeUsdc = 0;
     const agentIds = new Set();
     for (let from = 0; from < tradeCount; from += 1000) {
       const { data: page } = await supabase
@@ -2801,6 +2803,9 @@ app.get('/api/stats', async (req, res) => {
           agentTrades += 1;
           agentVolumeUsdc += amt;
           agentIds.add(uid || 'agent');
+        } else if (isSeedWallet(uid)) {
+          seedTrades += 1;
+          seedVolumeUsdc += amt;
         }
       }
       if (page.length < 1000) break;
@@ -2825,11 +2830,13 @@ app.get('/api/stats', async (req, res) => {
       marketsResolved: resolvedRes.count ?? 0,
       // Traction snapshot (verifiable, no PII) — surfaced on the public /stats page.
       users: usersRes.count ?? 0,
-      humanTrades: Math.max(0, tradeCount - agentTrades),
+      humanTrades: Math.max(0, tradeCount - agentTrades - seedTrades),
       agentTrades,
       agents: agentIds.size,
-      humanVolumeUsdc: r2(volumeUsdc - agentVolumeUsdc),
+      humanVolumeUsdc: r2(volumeUsdc - agentVolumeUsdc - seedVolumeUsdc),
       agentVolumeUsdc: r2(agentVolumeUsdc),
+      seedTrades,
+      seedVolumeUsdc: r2(seedVolumeUsdc),
       nanopayments: { count: payCount, volumeUsdc: Math.round(nanoVolumeUsdc * 1e6) / 1e6 },
       updatedAt: new Date().toISOString(),
     };
@@ -3937,6 +3944,7 @@ async function updateLeaderboard() {
     const __LB_CONC = 6;
     const __computeUser = async ([userId, tradesList]) => {
       try {
+        if (isSeedWallet(userId)) return; // seed/liquidity wallet — not a human trader, keep it off the board
         let totalVolume = 0;
         let tradesCount = 0;
         let totalPnL = 0;
@@ -4242,6 +4250,7 @@ app.get('/api/leaderboard', async (req, res) => {
           const userStats = {};
           for (const t of allTrades) {
             if (!t.user_id) continue;
+            if (isSeedWallet(t.user_id)) continue; // seed/liquidity wallet — exclude
             // Same humans-vs-agents bucketing as the cron (see updateLeaderboard)
             const isAgentTrade = typeof t.question === 'string' && t.question.startsWith('🤖 Agent:');
             const key = t.user_id === HOUSE_AGENT_USER
@@ -6287,6 +6296,12 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
 const HOUSE_AGENT = (process.env.HOUSE_AGENT || 'true') === 'true';
 const HOUSE_AGENT_USER = 'house_pulse';
 const HOUSE_AGENT_KEY = `agent_${HOUSE_AGENT_USER}`;
+// Seed / liquidity wallets: raw 0x EOAs created by seed scripts to bootstrap
+// market liquidity — NOT real people. The app only ever creates eth_<addr>
+// (MetaMask) or supabase_<uuid> (Google) ids, so a bare 0x… id is always seed.
+// Excluded from the "humans" bucket so /versus + /stats don't pass off seeded
+// liquidity as human traders.
+const isSeedWallet = (uid) => typeof uid === 'string' && /^0x[0-9a-fA-F]{40}$/.test(uid);
 const HOUSE_AGENT_INTERVAL_MIN = Math.max(2, parseInt(process.env.HOUSE_AGENT_INTERVAL_MIN || '10'));
 const HOUSE_AGENT_MAX_TRADE = 0.5; // USDC per decision
 let houseAgentFundedThisRun = false;
