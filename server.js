@@ -5045,6 +5045,114 @@ async function buySignalForUserAgent(userId, agent, query) {
   return { ok: true, signal, price, txId };
 }
 
+// Execute ONE market buy from the agent's wallet (deploy-on-demand → approve →
+// buyYes/buyNo → poll). Returns a result object (no res.json) so it's safe to
+// call in a loop for multi-market requests.
+async function execAgentTrade(userId, agent, market, side, amount) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!market || !market.slug) return { ok: false, error: 'market not found' };
+  if (market.deadline && market.deadline <= nowSec) return { ok: false, error: 'that market has already closed' };
+  try {
+    const contractAddress = await getOrDeployMarket(market.slug, market.deadline);
+    try {
+      const info = await publicClient.readContract({
+        address: contractAddress,
+        abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [], outputs: [
+          { name: '_slug', type: 'string' }, { name: '_deadline', type: 'uint256' },
+          { name: '_resolved', type: 'bool' }, { name: '_outcome', type: 'bool' },
+          { name: '_yesOutstanding', type: 'uint256' }, { name: '_noOutstanding', type: 'uint256' } ] }],
+        functionName: 'getMarketInfo',
+      });
+      if (info[2] || Number(info[1]) <= nowSec) return { ok: false, error: 'already closed on-chain' };
+    } catch (_) {}
+    const amountMicro = Math.round(amount * 1_000_000).toString();
+    if (!(await isApproved(agent.walletId, contractAddress))) {
+      const MAX = '115792089237316195423570985008687907853269984665640564039457584007913129639935';
+      await circle.createContractExecutionTransaction({
+        walletId: agent.walletId, contractAddress: USDC,
+        abiFunctionSignature: 'approve(address,uint256)', abiParameters: [contractAddress, MAX],
+        fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+      });
+      await new Promise(r => setTimeout(r, 4500));
+    }
+    const txRes = await circle.createContractExecutionTransaction({
+      walletId: agent.walletId, contractAddress,
+      abiFunctionSignature: side === 'YES' ? 'buyYes(uint256)' : 'buyNo(uint256)',
+      abiParameters: [amountMicro],
+      fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+    });
+    const circleId = txRes.data.id;
+    let txHash = null, finalState = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        const st = await circle.getTransaction({ id: circleId });
+        const tx = st.data?.transaction;
+        if (tx?.txHash) txHash = tx.txHash;
+        finalState = tx?.state;
+        if (['COMPLETE', 'FAILED', 'DENIED', 'CANCELLED'].includes(finalState)) break;
+      } catch (_) {}
+    }
+    if (['FAILED', 'DENIED', 'CANCELLED'].includes(finalState)) return { ok: false, error: `on-chain ${finalState.toLowerCase()}` };
+    await saveTrade(userId, {
+      tx_id: circleId, side, usdc_amount: amount, entry_price: 0.5,
+      question: `🤖 Agent: ${market.question || market.slug}`, market_id: contractAddress,
+      state: finalState === 'COMPLETE' ? 'COMPLETE' : 'INITIATED', tx_hash: txHash,
+    });
+    recordAgentReputation(`agent_${userId}`, agent.address, 90, 'successful_trade').catch(() => {});
+    return { ok: true, trade: { slug: market.slug, question: market.question || market.slug, side, usdcAmount: amount, txHash, txId: circleId, contractAddress } };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// Broad live-market index (cached 5m) so the agent can buy a market the user
+// NAMES even when it isn't in the top-volume chat feed.
+let _agentMarketIdx = { at: 0, list: [] };
+async function broadGammaMarkets() {
+  if (Date.now() - _agentMarketIdx.at < 5 * 60 * 1000 && _agentMarketIdx.list.length) return _agentMarketIdx.list;
+  const out = [];
+  try {
+    const r = await fetch('https://gamma-api.polymarket.com/markets?closed=false&active=true&order=volume&ascending=false&limit=300', { headers: { Accept: 'application/json' } });
+    if (r.ok) {
+      const list = await r.json();
+      const nowSec = Math.floor(Date.now() / 1000);
+      for (const j of (Array.isArray(list) ? list : [])) {
+        if (!j.slug || !j.question) continue;
+        const endRaw = j.endDate || j.endDateIso;
+        const dl = endRaw ? Math.floor(new Date(endRaw).getTime() / 1000) : nowSec + 30 * 86400;
+        if (dl <= nowSec + 3600) continue;
+        out.push({ slug: j.slug, question: j.question, deadline: dl });
+      }
+    }
+  } catch (_) {}
+  if (out.length) _agentMarketIdx = { at: Date.now(), list: out };
+  return out.length ? out : _agentMarketIdx.list;
+}
+const _normQ = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+function _matchScore(query, m) {
+  const hay = _normQ(m.question) + ' ' + _normQ(m.slug);
+  const words = _normQ(query).split(' ').filter((w) => w.length > 2);
+  if (!words.length) return 0;
+  let hit = 0; for (const w of words) if (hay.includes(w)) hit++;
+  return hit / words.length;
+}
+// Resolve a market the agent NAMED (full question or slug) — NOT limited to the
+// chat feed. Tries the feed, deployed markets, then a broad gamma search.
+async function resolveMarketByName(name, feed) {
+  const q = String(name || '').trim();
+  if (!q) return null;
+  const direct = (feed || []).find((m) => m.slug === q);
+  if (direct) return direct;
+  if (deployedMarketsCache.has(q)) { const c = deployedMarketsCache.get(q); return { slug: q, question: q, deadline: Number(c.deadline) || 0 }; }
+  let best = null, bestScore = 0;
+  for (const m of (feed || [])) { const s = _matchScore(q, m); if (s > bestScore) { bestScore = s; best = m; } }
+  if (best && bestScore >= 0.6) return best;
+  const broad = await broadGammaMarkets();
+  for (const m of broad) { const s = _matchScore(q, m); if (s > bestScore) { bestScore = s; best = m; } }
+  return (best && bestScore >= 0.55) ? best : null;
+}
+
 // budget + market and executes the buy autonomously from the agent wallet.
 app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
@@ -5096,16 +5204,22 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
       console.error('[agent/chat] research failed:', e.message);
     }
 
-    const sys = `You are Puls Agent, an autonomous trading agent on Arc Testnet with ${remaining.toFixed(2)} USDC to spend.
-These are the live prediction markets you can trade (slug: question):
+    const sys = `You are Puls Agent, an autonomous trading agent on Arc Testnet with ${remaining.toFixed(2)} USDC to spend. You can analyze markets, trade prediction markets, and buy premium forecasts ("signals") from other agents — paying in USDC on Arc.
+Examples of live markets (you are NOT limited to these — you may name ANY real prediction market by its full question and I will find + deploy it):
 ${marketLines || '(none available)'}
-${research.brief ? `\nLive web research for context (base your reasoning on this, cite it in your reply if relevant):\n${research.brief}\n` : ''}
-When the user wants you to buy, pick the most relevant market and respond with ONE line of JSON only:
-{"action":"buy","slug":"<exact slug from the list>","side":"YES|NO","usdcAmount":<number <= ${remaining.toFixed(2)}>,"reply":"<short explanation of your pick, grounded in the research>"}
-When the user wants to BUY or UNLOCK a SIGNAL / alpha / forecast (premium analysis from another forecaster — NOT a market trade; e.g. "buy the top signal", "unlock some alpha", "buy a signal about bitcoin"), respond:
-{"action":"buy_signal","query":"<topic keywords, or 'top' for the best one>","reply":"<short explanation>"}
-Otherwise respond: {"action":"none","reply":"<your message, informed by the research>"}
-Never exceed your budget. Prefer markets marked [ready]. Output ONLY the JSON object.`;
+${research.brief ? `\nLive web research (reason over this, cite it in your reply):\n${research.brief}\n` : ''}
+Respond with ONE JSON object only:
+{"actions":[ ...zero or more... ],"reply":"<your analysis / explanation, grounded in the research>"}
+Each action is exactly one of:
+- {"type":"buy","market":"<full market question or slug>","side":"YES"|"NO","usdc":<number>}   // buy shares in a prediction market
+- {"type":"buy_signal","query":"<topic, or 'top' for the best one>"}                            // pay another forecaster for premium alpha (x402)
+Rules:
+- If the user asks to buy SEVERAL markets in one message, return one "buy" action per market, each with its amount.
+- "market" may be ANY real prediction market the user names (e.g. "Will Spain reach the Round of 16 at the 2026 FIFA World Cup?", "Will BTC close above $100k by 2026-12-31"). Honor the amounts they give.
+- Decide YES/NO from your reasoning + the research (and any signal the user told you to act on).
+- The SUM of usdc across all actions must be <= ${remaining.toFixed(2)}.
+- If the user only wants analysis or chat, return "actions":[] and put everything in "reply".
+Output ONLY the JSON object.`;
 
     let intent = { action: 'none', reply: '' };
     try {
@@ -5120,120 +5234,66 @@ Never exceed your budget. Prefer markets marked [ready]. Output ONLY the JSON ob
       return res.status(502).json({ error: `LLM error: ${e.message}` });
     }
 
-    // Validate + execute autonomously within budget.
-    let trade = null;
-    let signalBought = null;
+    // Normalize to an actions[] list (back-compat with the old single-intent shape).
+    let actions = [];
+    if (Array.isArray(intent.actions)) actions = intent.actions;
+    else if (intent.action === 'buy') actions = [{ type: 'buy', market: intent.market || intent.slug, side: intent.side, usdc: intent.usdc ?? intent.usdcAmount }];
+    else if (intent.action === 'buy_signal') actions = [{ type: 'buy_signal', query: intent.query || intent.slug }];
+    // Reroute a mis-parsed market "buy" that clearly means a SIGNAL.
+    actions = actions.map((a) => {
+      const ref = a.market || a.slug || '';
+      if ((a.type === 'buy' || !a.type) && ref && !feedBySlug[ref] && !deployedMarketsCache.has(ref)
+          && /\bsignal|alpha|forecast\b/i.test(`${ref} ${message}`)) {
+        return { type: 'buy_signal', query: a.query || ref };
+      }
+      return a;
+    });
+
+    // Execute each action within the on-chain budget; aggregate the results.
+    const trades = [];
+    const signalsBought = [];
+    const notes = [];
     let spentNow = 0;
-    // Robustness: a market "buy" whose slug isn't a real market but clearly means
-    // a SIGNAL → reroute to buy_signal (fixes "buy the top signal" being read as a
-    // market named "top signal").
-    if (intent.action === 'buy' && intent.slug && !feedBySlug[intent.slug]
-        && !deployedMarketsCache.has(intent.slug)
-        && /signal|alpha|forecast/i.test(`${intent.slug} ${message}`)) {
-      intent.action = 'buy_signal';
-      intent.query = intent.query || intent.slug;
-    }
-    if (intent.action === 'buy') {
-      const slug = intent.slug;
-      const amount = parseFloat(intent.usdcAmount);
-      const side = intent.side === 'NO' ? 'NO' : 'YES';
-      const market = feedBySlug[slug] || (deployedMarketsCache.has(slug) ? { slug, deadline: deployedMarketsCache.get(slug).deadline } : null);
-      if (!market) {
-        intent.reply = `I can't trade "${slug}" — it isn't in the live feed.`;
-      } else if (market.deadline && market.deadline <= Math.floor(Date.now() / 1000)) {
-        intent.reply = `I can't trade "${slug}" — that market has already closed. Pick another one.`;
-      } else if (!(amount > 0) || amount > remaining) {
-        intent.reply = `That would exceed my remaining budget of ${remaining.toFixed(2)} USDC.`;
+    let budgetLeft = remaining;
+    for (const act of actions.slice(0, 6)) {
+      const type = act.type || 'buy';
+      if (type === 'buy_signal') {
+        if (budgetLeft < 0.001) { notes.push('• skipped a signal — no budget left'); continue; }
+        const r = await buySignalForUserAgent(userId, { ...agent, balance: budgetLeft }, act.query || '');
+        if (r.ok) {
+          spentNow += r.price; budgetLeft -= r.price;
+          const who = (String(r.signal.creator_user_id || '').replace(/^agent_(swarm_)?/, '').replace(/^./, (c) => c.toUpperCase())) || 'a forecaster';
+          signalsBought.push({ id: r.signal.id, title: r.signal.title, price: r.price, txId: r.txId, stance: r.signal.stance || null, thesis: r.signal.thesis || null, marketQuestion: r.signal.market_question || null });
+          notes.push(`• bought signal “${r.signal.title}”${r.signal.stance ? ' (' + r.signal.stance + ')' : ''} from ${who} · $${r.price.toFixed(3)} x402`);
+        } else notes.push(`• couldn't buy a signal — ${r.reason}`);
       } else {
-        try {
-          // Deploy-on-demand if needed (instant if already deployed).
-          const contractAddress = await getOrDeployMarket(slug, market.deadline);
-
-          // Verify the CONTRACT's actual on-chain deadline (cached markets may have a
-          // stale/past deadline that differs from the live feed) before attempting a buy.
-          try {
-            const info = await publicClient.readContract({
-              address: contractAddress,
-              abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [], outputs: [
-                { name: '_slug', type: 'string' }, { name: '_deadline', type: 'uint256' },
-                { name: '_resolved', type: 'bool' }, { name: '_outcome', type: 'bool' },
-                { name: '_yesOutstanding', type: 'uint256' }, { name: '_noOutstanding', type: 'uint256' } ] }],
-              functionName: 'getMarketInfo',
-            });
-            const onChainDeadline = Number(info[1]);
-            const onChainResolved = info[2];
-            if (onChainResolved || onChainDeadline <= Math.floor(Date.now() / 1000)) {
-              return res.json({ reply: `That market is already closed on-chain. Ask me to pick a different one.`, trade: null, remaining });
-            }
-          } catch (_) {}
-
-          const amountMicro = Math.round(amount * 1_000_000).toString();
-          if (!(await isApproved(agent.walletId, contractAddress))) {
-            const MAX = '115792089237316195423570985008687907853269984665640564039457584007913129639935';
-            await circle.createContractExecutionTransaction({
-              walletId: agent.walletId, contractAddress: USDC,
-              abiFunctionSignature: 'approve(address,uint256)', abiParameters: [contractAddress, MAX],
-              fee: { type: 'level', config: { feeLevel: 'HIGH' } },
-            });
-            await new Promise(r => setTimeout(r, 4500));
-          }
-          const txRes = await circle.createContractExecutionTransaction({
-            walletId: agent.walletId, contractAddress,
-            abiFunctionSignature: side === 'YES' ? 'buyYes(uint256)' : 'buyNo(uint256)',
-            abiParameters: [amountMicro],
-            fee: { type: 'level', config: { feeLevel: 'HIGH' } },
-          });
-          const circleId = txRes.data.id;
-          // Poll for the on-chain tx hash + final state (Circle returns a UUID, not a 0x hash).
-          let txHash = null, finalState = null;
-          for (let i = 0; i < 20; i++) {
-            await new Promise(r => setTimeout(r, 1500));
-            try {
-              const st = await circle.getTransaction({ id: circleId });
-              const tx = st.data?.transaction;
-              if (tx?.txHash) txHash = tx.txHash;
-              finalState = tx?.state;
-              if (['COMPLETE', 'FAILED', 'DENIED', 'CANCELLED'].includes(finalState)) break;
-            } catch (_) {}
-          }
-          if (['FAILED', 'DENIED', 'CANCELLED'].includes(finalState)) {
-            intent.reply = `The trade didn't go through (on-chain ${finalState.toLowerCase()}). Your budget is unchanged — try a different market or amount.`;
-          } else {
-            await saveTrade(userId, {
-              tx_id: circleId, side, usdc_amount: amount, entry_price: 0.5,
-              question: `🤖 Agent: ${market.question || slug}`, market_id: contractAddress,
-              state: finalState === 'COMPLETE' ? 'COMPLETE' : 'INITIATED', tx_hash: txHash,
-            });
-            spentNow = amount;
-            trade = { slug, side, usdcAmount: amount, txHash, txId: circleId, contractAddress };
-            // ERC-8004: an independent validator (admin wallet) attests the agent
-            // executed a successful trade. Non-blocking so the chat stays snappy.
-            recordAgentReputation(`agent_${userId}`, agent.address, 90, 'successful_trade').catch(() => {});
-          }
-        } catch (e) {
-          intent.reply = `Trade failed: ${e.message}`;
-        }
-      }
-    } else if (intent.action === 'buy_signal') {
-      if (remaining < 0.001) {
-        intent.reply = `I don't have the budget to buy a signal — my balance is ${remaining.toFixed(3)} USDC. Fund me and I'll grab the best alpha.`;
-      } else {
-        const r = await buySignalForUserAgent(userId, agent, intent.query || intent.slug || '');
-        if (!r.ok) {
-          intent.reply = r.reason || "I couldn't buy a signal right now.";
-        } else {
-          const s = r.signal;
-          spentNow = r.price;
-          const who = (String(s.creator_user_id || '').replace(/^agent_(swarm_)?/, '').replace(/^./, (c) => c.toUpperCase())) || 'a forecaster';
-          const stance = s.stance ? ` — calls ${s.stance}` : '';
-          intent.reply = `Bought "${s.title}"${stance} for $${r.price.toFixed(3)} from ${who}, paid on Arc (x402).\n\n${(s.thesis || '').trim()}${s.market_question ? `\n\nMarket: ${s.market_question}` : ''}`;
-          signalBought = { id: s.id, title: s.title, price: r.price, txId: r.txId, stance: s.stance || null, creator: s.creator_user_id };
-          recordAgentReputation(`agent_${userId}`, agent.address, 88, 'bought_signal').catch(() => {});
-        }
+        const amount = parseFloat(act.usdc ?? act.usdcAmount);
+        const side = String(act.side || 'YES').toUpperCase() === 'NO' ? 'NO' : 'YES';
+        const ref = act.market || act.slug || act.query || '';
+        if (!(amount > 0)) { notes.push(`• skipped "${ref}" — no amount given`); continue; }
+        if (amount > budgetLeft + 1e-9) { notes.push(`• skipped "${ref}" — $${amount} over my remaining $${budgetLeft.toFixed(2)}`); continue; }
+        const market = await resolveMarketByName(ref, feed);
+        if (!market) { notes.push(`• couldn't find a market matching "${ref}"`); continue; }
+        const r = await execAgentTrade(userId, agent, market, side, amount);
+        if (r.ok) { spentNow += amount; budgetLeft -= amount; trades.push(r.trade); notes.push(`• ${side} $${amount} → “${market.question || market.slug}”`); }
+        else notes.push(`• "${market.question || market.slug}": ${r.error}`);
       }
     }
 
-    res.json({ reply: formatForApp(intent.reply) || 'Done.', trade, signal: signalBought, remaining: Math.max(0, remaining - spentNow), reputation: agentRepCount.get(`agent_${userId}`) ?? 0, sources: (research.sources || []).slice(0, 3) });
+    let replyText = String(intent.reply || '').trim();
+    if (notes.length) replyText += (replyText ? '\n\n' : '') + notes.join('\n');
+    if (!replyText) replyText = 'Done.';
+
+    res.json({
+      reply: formatForApp(replyText),
+      trade: trades[0] || null,           // back-compat: first trade
+      trades,
+      signal: signalsBought[0] || null,   // back-compat: first signal
+      signals: signalsBought,
+      remaining: Math.max(0, remaining - spentNow),
+      reputation: agentRepCount.get(`agent_${userId}`) ?? 0,
+      sources: (research.sources || []).slice(0, 3),
+    });
   } catch (e) {
     console.error('agent chat error:', e.message);
     res.status(500).json({ error: e.message });
