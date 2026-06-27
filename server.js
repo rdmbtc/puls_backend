@@ -5159,11 +5159,12 @@ async function resolveMarketByName(name, feed) {
   try {
     const nowSec = Math.floor(Date.now() / 1000);
     const { data: dm } = await supabase.from('deployed_markets')
-      .select('slug, question, deadline, resolved, archived').eq('resolved', false)
-      .order('created_at', { ascending: false }).limit(500);
+      .select('slug, deadline, resolved, archived')
+      .order('created_at', { ascending: false }).limit(800);
     for (const m of (dm || [])) {
-      if (!m.slug || !m.question || m.archived === true) continue;
-      consider({ slug: m.slug, question: m.question, deadline: Number(m.deadline) || nowSec + 30 * 86400 });
+      if (!m.slug || m.archived === true || m.resolved === true) continue;
+      const question = m.slug.replace(/-\d{10,}$/, '').replace(/-/g, ' ');
+      consider({ slug: m.slug, question, deadline: Number(m.deadline) || nowSec + 30 * 86400 });
     }
   } catch (_) {}
   if (best && bestScore >= 0.55) return best;
