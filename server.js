@@ -5130,6 +5130,9 @@ async function broadGammaMarkets() {
   return out.length ? out : _agentMarketIdx.list;
 }
 const _normQ = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const _expandSyn = (s) => String(s || '')
+  .replace(/\bbtc\b/gi, 'bitcoin').replace(/\beth\b/gi, 'ethereum').replace(/\bsol\b/gi, 'solana')
+  .replace(/\bro16\b/gi, 'round of 16').replace(/\b100k\b/gi, '100000');
 function _matchScore(query, m) {
   const hay = _normQ(m.question) + ' ' + _normQ(m.slug);
   const words = _normQ(query).split(' ').filter((w) => w.length > 2);
@@ -5138,18 +5141,34 @@ function _matchScore(query, m) {
   return hit / words.length;
 }
 // Resolve a market the agent NAMED (full question or slug) — NOT limited to the
-// chat feed. Tries the feed, deployed markets, then a broad gamma search.
+// chat feed. Tries the feed, then PULS's OWN deployed markets (the swarm creates
+// many crypto/WC markets), then a broad gamma search. Synonym-expands the query
+// (btc→bitcoin, ro16→round of 16, 100k→100000) so casual phrasing still matches.
 async function resolveMarketByName(name, feed) {
-  const q = String(name || '').trim();
-  if (!q) return null;
-  const direct = (feed || []).find((m) => m.slug === q);
+  const q0 = String(name || '').trim();
+  if (!q0) return null;
+  const q = _expandSyn(q0);
+  const direct = (feed || []).find((m) => m.slug === q0);
   if (direct) return direct;
-  if (deployedMarketsCache.has(q)) { const c = deployedMarketsCache.get(q); return { slug: q, question: q, deadline: Number(c.deadline) || 0 }; }
+  if (deployedMarketsCache.has(q0)) { const c = deployedMarketsCache.get(q0); return { slug: q0, question: q0, deadline: Number(c.deadline) || 0 }; }
   let best = null, bestScore = 0;
-  for (const m of (feed || [])) { const s = _matchScore(q, m); if (s > bestScore) { bestScore = s; best = m; } }
+  const consider = (m) => { const s = _matchScore(q, m); if (s > bestScore) { bestScore = s; best = m; } };
+  for (const m of (feed || [])) consider(m);
   if (best && bestScore >= 0.6) return best;
+  // PULS's own deployed markets (agents create crypto/WC markets) — fuzzy on question.
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const { data: dm } = await supabase.from('deployed_markets')
+      .select('slug, question, deadline, resolved, archived').eq('resolved', false)
+      .order('created_at', { ascending: false }).limit(500);
+    for (const m of (dm || [])) {
+      if (!m.slug || !m.question || m.archived === true) continue;
+      consider({ slug: m.slug, question: m.question, deadline: Number(m.deadline) || nowSec + 30 * 86400 });
+    }
+  } catch (_) {}
+  if (best && bestScore >= 0.55) return best;
   const broad = await broadGammaMarkets();
-  for (const m of broad) { const s = _matchScore(q, m); if (s > bestScore) { bestScore = s; best = m; } }
+  for (const m of broad) consider(m);
   return (best && bestScore >= 0.55) ? best : null;
 }
 
