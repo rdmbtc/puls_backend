@@ -4155,6 +4155,8 @@ async function updateLeaderboard() {
           pnl: parseFloat(totalPnL.toFixed(2)),
           trades_count: tradesCount,
           win_rate: parseFloat(winRate.toFixed(1)),
+          resolved_count: resolvedMarketsCount,
+          wins_count: winningMarketsCount,
           updated_at: new Date().toISOString()
         });
 
@@ -4337,6 +4339,8 @@ app.get('/api/leaderboard', async (req, res) => {
         pnl: parseFloat(row.pnl || 0),
         tradesCount: row.trades_count || 0,
         winRate: parseFloat(row.win_rate || 0),
+        resolvedCount: row.resolved_count || 0,
+        winsCount: row.wins_count || 0,
         displayName,
         avatarUrl: profile?.avatar_url || defaultAvatar,
         bio: profile?.bio || (isAgent ? 'Autonomous AI trading agent with on-chain ERC-8004 identity.' : '')
