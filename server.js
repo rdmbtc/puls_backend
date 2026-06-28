@@ -3061,7 +3061,7 @@ registerTips(app, {
   awardPoints,
 });
 
-// ── Puls Streams (pay-per-second USDC streaming on Arc — RFB 4) ──────────────
+// ── Puls Streams (pay-per-second USDC streaming on Arc) ─────────────────────
 // Continuous authorization (approve a rate + cap), proof-of-flow metering that
 // auto-pauses the instant flow stops, and Gateway-style batched on-chain USDC
 // settlement, with a live revenue split. Agents open/tick/stop streams
@@ -7483,7 +7483,7 @@ const swarm = registerSwarm(app, {
 });
 if (typeof swarm.start === 'function') swarm.start();
 
-// Autonomous streaming agent (RFB 4 + agentic sophistication): a trader agent
+// Autonomous streaming agent: a trader agent
 // rents a creator's live alpha feed per second, choosing the rate by expected
 // value (bankroll x conviction) and tapping stop when the marginal value of the
 // next second falls below the price. Drives streamsApi.open/tick/stop and logs

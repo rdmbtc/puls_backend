@@ -1,4 +1,4 @@
--- Puls Streams — pay-per-second USDC streaming on Arc (RFB 4).
+-- Puls Streams — pay-per-second USDC streaming on Arc.
 --
 -- A stream is a continuous authorization: the payer approves a RATE ($/sec) and
 -- a CAP, the meter accrues per second while the consumer keeps "ticking"
