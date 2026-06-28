@@ -21,6 +21,7 @@ import { registerCreatorSignals } from './lib/creator_signals.js';
 import { registerAgentBond } from './lib/agent_bond.js';
 import { registerSwap } from './lib/swap.js';
 import { registerStreaming } from './lib/streaming.js';
+import { registerStreamingAgent } from './lib/streaming_agent.js';
 import { registerBlog } from './lib/blog.js';
 import { registerAgentOracle } from './lib/agent_oracle.js';
 import { researchQuestion } from './lib/agent_research.js';
@@ -7481,6 +7482,13 @@ const swarm = registerSwarm(app, {
   deployedMarketsCache,
 });
 if (typeof swarm.start === 'function') swarm.start();
+
+// Autonomous streaming agent (RFB 4 + agentic sophistication): a trader agent
+// rents a creator's live alpha feed per second, choosing the rate by expected
+// value (bankroll x conviction) and tapping stop when the marginal value of the
+// next second falls below the price. Drives streamsApi.open/tick/stop and logs
+// each session to the agent_decision feed. Gated by STREAM_AGENT_ENABLED.
+registerStreamingAgent({ streamsApi, supabase, getWalletId, getWalletInfo, llmComplete, parseLlmJson, roster: swarm.roster });
 
 // Run strategies check every 60 seconds
 setInterval(runAgentStrategies, 60 * 1000);
