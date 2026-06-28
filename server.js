@@ -7212,11 +7212,17 @@ app.get('/api/agents/house', async (req, res) => {
     let agent = null;
     if (walletId) {
       const info = await getWalletInfo(walletId);
+      // Resolve the ERC-8004 id on cache miss (persisted store / bounded scan) so
+      // Pulse's id is shown + persisted right after a restart, like the swarm roster.
+      let erc8004Id = agentTokenIds.get(HOUSE_AGENT_KEY) ?? null;
+      if (erc8004Id == null && info.address) {
+        try { erc8004Id = await resolveAgentTokenId(HOUSE_AGENT_KEY, info.address); } catch (_) {}
+      }
       agent = {
         name: 'Pulse',
         address: info.address,
         balance: parseFloat(info.usdcBalance) || 0,
-        erc8004Id: agentTokenIds.get(HOUSE_AGENT_KEY) ?? null,
+        erc8004Id,
         reputation: agentRepCount.get(HOUSE_AGENT_KEY) ?? 0,
         enabled: HOUSE_AGENT,
         intervalMinutes: HOUSE_AGENT_INTERVAL_MIN,
