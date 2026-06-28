@@ -20,6 +20,7 @@ import { registerReferrals } from './lib/referrals.js';
 import { registerCreatorSignals } from './lib/creator_signals.js';
 import { registerAgentBond } from './lib/agent_bond.js';
 import { registerSwap } from './lib/swap.js';
+import { registerStreaming } from './lib/streaming.js';
 import { registerBlog } from './lib/blog.js';
 import { registerAgentOracle } from './lib/agent_oracle.js';
 import { researchQuestion } from './lib/agent_research.js';
@@ -3053,6 +3054,25 @@ registerTips(app, {
   USDC,
   getWalletId,
   getWalletInfo,
+  authenticateUser,
+  requireVerifiedUser,
+  strictLimiter,
+  awardPoints,
+});
+
+// ── Puls Streams (pay-per-second USDC streaming on Arc — RFB 4) ──────────────
+// Continuous authorization (approve a rate + cap), proof-of-flow metering that
+// auto-pauses the instant flow stops, and Gateway-style batched on-chain USDC
+// settlement, with a live revenue split. Agents open/tick/stop streams
+// programmatically via `streamsApi.*`. Live USDC movement gated by
+// STREAMS_PAID_ENABLED (the meter still accrues when off, fully demoable).
+const streamsApi = registerStreaming(app, {
+  supabase,
+  circle,
+  USDC,
+  getWalletId,
+  getWalletInfo,
+  apiKeyOrAuth,
   authenticateUser,
   requireVerifiedUser,
   strictLimiter,
