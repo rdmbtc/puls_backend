@@ -6601,7 +6601,7 @@ let houseAgentBusy = false;
 // ── Sage: a SECOND autonomous agent that is a creator, not a trader ──────────
 // Sage publishes premium Signals (on-chain attested via SignalRegistry) and
 // gets PAID by other agents who buy them. This makes Pulse→Sage a true
-// agent-to-agent value transfer on Arc (RFB 3): one AI pays another AI for
+// agent-to-agent value transfer on Arc: one AI pays another AI for
 // alpha, settled in USDC, with on-chain provenance for the content.
 const SIGNAL_REGISTRY_ADDRESS = (process.env.SIGNAL_REGISTRY_ADDRESS || '').trim();
 const SAGE_AGENT = (process.env.SAGE_AGENT || 'true') === 'true';

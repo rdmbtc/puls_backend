@@ -1,7 +1,7 @@
 /**
  * Puls agent loop — the full "agent pays a creator, then decides and trades" cycle.
  *
- * Centrepiece of our Lepton narrative (RFB 1/2/3 + Agentic 30%): the house agent
+ * Centrepiece of the agent economy: the house agent
  * **Pulse** does NOT just automate a formula — it spends real USDC to buy an alpha
  * signal from a creator, reasons over it with an LLM, makes a YES/NO/SKIP decision,
  * and books PnL **net of the signal cost**. Value too small to move before now
