@@ -26,6 +26,7 @@ import { researchQuestion } from './lib/agent_research.js';
 import { registerSwarm, buildSwarmRoster } from './lib/agent_swarm.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
+import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
 
 // Prevent unhandled promise rejections from crashing the server
 process.on('unhandledRejection', (reason, promise) => {
@@ -5212,7 +5213,25 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
     }
     const feedBySlug = Object.fromEntries(feed.map(m => [m.slug, m]));
 
-    const marketLines = feed.map(m => `- ${m.slug}: "${m.question}"${m.deployed ? ' [ready]' : ''}`).join('\n');
+    const marketLines = feed.map((m, i) => `${i + 1}. ${m.question}${m.deployed ? ' [ready]' : ''}`).join('\n');
+
+    // Pull a few published signals so the model can quote a real topic (and so
+    // "top signal" resolves to the best one). Best-effort; never blocks chat.
+    let signalMenu = '';
+    try {
+      const { data: sigRows } = await supabase
+        .from('creator_signals')
+        .select('id, title, stance, price_usdc')
+        .eq('status', 'published')
+        .neq('creator_user_id', `agent_${userId}`)
+        .order('created_at', { ascending: false })
+        .limit(5);
+      if (sigRows && sigRows.length) {
+        signalMenu = sigRows.map((s, i) => `${i + 1}. "${s.title}"${s.stance ? ` (${s.stance})` : ''} — ${s.price_usdc} USDC`).join('\n');
+      }
+    } catch (e) {
+      console.warn('[agent/chat] signal menu fetch error:', e.message);
+    }
 
     // Vision: research the open web on the user's question so the agent reasons
     // over real, current information (and can cite it) — same rail the house
@@ -5225,8 +5244,9 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
     }
 
     const sys = `You are Puls Agent, an autonomous trading agent on Arc Testnet with ${remaining.toFixed(2)} USDC to spend. You can analyze markets, trade prediction markets, and buy premium forecasts ("signals") from other agents — paying in USDC on Arc.
-Examples of live markets (you are NOT limited to these — you may name ANY real prediction market by its full question and I will find + deploy it):
+Live markets (numbered by popularity — you may also name ANY other real prediction market by its full question and I will find + deploy it):
 ${marketLines || '(none available)'}
+${signalMenu ? `\nLive signals you can buy (numbered, newest first):\n${signalMenu}\n` : ''}
 ${research.brief ? `\nLive web research (reason over this, cite it in your reply):\n${research.brief}\n` : ''}
 Respond with ONE JSON object only:
 {"actions":[ ...zero or more... ],"reply":"<your analysis / explanation, grounded in the research>"}
@@ -5234,6 +5254,7 @@ Each action is exactly one of:
 - {"type":"buy","market":"<full market question or slug>","side":"YES"|"NO","usdc":<number>}   // buy shares in a prediction market
 - {"type":"buy_signal","query":"<topic, or 'top' for the best one>"}                            // pay another forecaster for premium alpha (x402)
 Rules:
+- "top market" / "best one" / "first" / "#1" ALWAYS means market #1 in the numbered list above. For a signal, "top signal"/"best signal" means use query "top".
 - If the user asks to buy SEVERAL markets in one message, return one "buy" action per market, each with its amount.
 - "market" may be ANY real prediction market the user names (e.g. "Will Spain reach the Round of 16 at the 2026 FIFA World Cup?", "Will BTC close above $100k by 2026-12-31"). Honor the amounts they give.
 - Decide YES/NO from your reasoning + the research (and any signal the user told you to act on).
@@ -5279,7 +5300,7 @@ Output ONLY the JSON object.`;
       const type = act.type || 'buy';
       if (type === 'buy_signal') {
         if (budgetLeft < 0.001) { notes.push('• skipped a signal — no budget left'); continue; }
-        const r = await buySignalForUserAgent(userId, { ...agent, balance: budgetLeft }, act.query || '');
+        const r = await buySignalForUserAgent(userId, { ...agent, balance: budgetLeft }, resolvePositionalSignal(act.query || '', message));
         if (r.ok) {
           spentNow += r.price; budgetLeft -= r.price;
           const who = (String(r.signal.creator_user_id || '').replace(/^agent_(swarm_)?/, '').replace(/^./, (c) => c.toUpperCase())) || 'a forecaster';
@@ -5292,7 +5313,10 @@ Output ONLY the JSON object.`;
         const ref = act.market || act.slug || act.query || '';
         if (!(amount > 0)) { notes.push(`• skipped "${ref}" — no amount given`); continue; }
         if (amount > budgetLeft + 1e-9) { notes.push(`• skipped "${ref}" — $${amount} over my remaining $${budgetLeft.toFixed(2)}`); continue; }
-        const market = await resolveMarketByName(ref, feed);
+        // Positional refs ("top market", "best one", "#1") → feed[0] deterministically,
+        // so the agent doesn't say "I can't find a market named 'top market'".
+        let market = resolvePositionalMarket(ref, message, feed);
+        if (!market) market = await resolveMarketByName(ref, feed);
         if (!market) { notes.push(`• couldn't find a market matching "${ref}"`); continue; }
         const r = await execAgentTrade(userId, agent, market, side, amount);
         if (r.ok) { spentNow += amount; budgetLeft -= amount; trades.push(r.trade); notes.push(`• ${side} $${amount} → “${market.question || market.slug}”`); }
