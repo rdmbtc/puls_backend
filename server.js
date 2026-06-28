@@ -4555,23 +4555,80 @@ const registeredAgents = new Set();
 const agentTokenIds = new Map();   // agentKey -> ERC-8004 token id (string)
 const agentRepCount = new Map();   // agentKey -> number of reputation events recorded
 
-// Find an agent's ERC-8004 token id from the IdentityRegistry Transfer (mint) event.
+// ── ERC-8004 identity helpers ────────────────────────────────────────────────
+// IdentityRegistry is ERC-721 (balanceOf works) but NOT Enumerable
+// (tokenOfOwnerByIndex/totalSupply revert), so we can cheaply ask "does this
+// address already own an identity?" but must read the mint event to learn the id.
+const IDENTITY_ERC721_ABI = [{
+  name: 'balanceOf', type: 'function', stateMutability: 'view',
+  inputs: [{ name: 'owner', type: 'address' }], outputs: [{ type: 'uint256' }],
+}];
+
+// Re-mint guard: true iff the address already holds >=1 ERC-8004 identity. This
+// is what makes registration idempotent ACROSS RESTARTS — the in-memory guard
+// (registeredAgents / s.registered) is reset each process, but balanceOf is the
+// durable on-chain source of truth. Without this, an agent whose original mint
+// is older than the event-scan window gets re-registered (a NEW token id, wasted
+// USDC gas) on every restart — which is why the swarm's "8004 id" kept changing.
+async function agentHasIdentity(agentAddress) {
+  if (!agentAddress) return false;
+  try {
+    const bal = await publicClient.readContract({
+      address: IDENTITY_REGISTRY, abi: IDENTITY_ERC721_ABI, functionName: 'balanceOf', args: [agentAddress],
+    });
+    return BigInt(bal) > 0n;
+  } catch (e) {
+    console.warn('[erc8004] balanceOf check failed:', e.message);
+    return false;
+  }
+}
+
+// Durable token-id store (optional `agent_identities` table). Silent no-op until
+// the table is created (migrations/2026-06-28-agent-identities.sql) — the event
+// scan still works meanwhile, so the fix is safe to deploy before the migration.
+async function getPersistedTokenId(agentKey) {
+  try {
+    const { data, error } = await supabase
+      .from('agent_identities').select('token_id').eq('agent_key', agentKey).maybeSingle();
+    if (error) return null;
+    return data?.token_id ?? null;
+  } catch { return null; }
+}
+async function persistTokenId(agentKey, tokenId, address) {
+  try {
+    await supabase.from('agent_identities').upsert({
+      agent_key: agentKey, token_id: String(tokenId), address: address || null, updated_at: new Date().toISOString(),
+    });
+  } catch { /* table may not exist yet — ignore */ }
+}
+
+// Resolve an agent's ERC-8004 token id, STABLE across restarts:
+//   in-memory cache → durable store → bounded backward scan of mint events.
+// Once found, the id is persisted so it never churns even after the mint ages
+// out of the scan window. Returns the most recent mint (matches what was shown).
+const ERC8004_SCAN_CHUNK = 9000n;            // per-call getLogs range (RPC caps ~10k)
+const ERC8004_SCAN_CHUNKS = Math.max(1, parseInt(process.env.ERC8004_SCAN_CHUNKS || '8', 10));
 async function resolveAgentTokenId(agentKey, agentAddress) {
   if (agentTokenIds.has(agentKey)) return agentTokenIds.get(agentKey);
+  const persisted = await getPersistedTokenId(agentKey);
+  if (persisted) { agentTokenIds.set(agentKey, persisted); return persisted; }
+  if (!agentAddress) return null;
   try {
-    const latest = await publicClient.getBlockNumber();
-    const fromBlock = latest > 9000n ? latest - 9000n : 0n;
-    const logs = await publicClient.getLogs({
-      address: IDENTITY_REGISTRY,
-      event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'),
-      args: { to: agentAddress },
-      fromBlock,
-      toBlock: latest,
-    });
-    if (logs.length > 0) {
-      const id = logs[logs.length - 1].args.tokenId.toString();
-      agentTokenIds.set(agentKey, id);
-      return id;
+    const evt = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)');
+    let toBlock = await publicClient.getBlockNumber();
+    for (let i = 0; i < ERC8004_SCAN_CHUNKS && toBlock > 0n; i++) {
+      const fromBlock = toBlock > ERC8004_SCAN_CHUNK ? toBlock - ERC8004_SCAN_CHUNK : 0n;
+      const logs = await publicClient.getLogs({
+        address: IDENTITY_REGISTRY, event: evt, args: { to: agentAddress }, fromBlock, toBlock,
+      });
+      if (logs.length > 0) {
+        const id = logs[logs.length - 1].args.tokenId.toString();
+        agentTokenIds.set(agentKey, id);
+        persistTokenId(agentKey, id, agentAddress);
+        return id;
+      }
+      if (fromBlock === 0n) break;
+      toBlock = fromBlock - 1n;
     }
   } catch (e) {
     console.error('resolveAgentTokenId error:', e.message);
@@ -6589,9 +6646,10 @@ async function ensureHouseAgentWallet() {
     }
   }
 
-  // ERC-8004 on-chain identity (idempotent: checks for an existing token first).
+  // ERC-8004 on-chain identity (idempotent: an existing identity is NEVER re-minted).
   if (!registeredAgents.has(HOUSE_AGENT_KEY)) {
-    const existing = await resolveAgentTokenId(HOUSE_AGENT_KEY, info.address);
+    let existing = await resolveAgentTokenId(HOUSE_AGENT_KEY, info.address);
+    if (!existing && await agentHasIdentity(info.address)) existing = true; // already owns one — don't re-mint
     if (existing) {
       registeredAgents.add(HOUSE_AGENT_KEY);
     } else if (balance >= 0.2) {
@@ -6663,7 +6721,8 @@ async function ensureSageAgent() {
 
     // 2) ERC-8004 identity (best-effort; needs a little USDC for gas-as-USDC).
     if (!registeredAgents.has(SAGE_AGENT_KEY)) {
-      const existing = await resolveAgentTokenId(SAGE_AGENT_KEY, info.address);
+      let existing = await resolveAgentTokenId(SAGE_AGENT_KEY, info.address);
+      if (!existing && await agentHasIdentity(info.address)) existing = true; // already owns one — don't re-mint
       if (existing) {
         registeredAgents.add(SAGE_AGENT_KEY);
       } else if ((parseFloat(info.usdcBalance) || 0) >= 0.2 || bal >= 0.2) {
@@ -7387,7 +7446,7 @@ const swarm = registerSwarm(app, {
   supabase, circle, walletClient, publicClient, adminAccount,
   getWalletId, saveWallet, getWalletInfo, ensureWalletSet, WALLET_ACCOUNT_TYPE,
   USDC, IDENTITY_REGISTRY, AGENT_METADATA_URI, SIGNAL_REGISTRY_ADDRESS,
-  resolveAgentTokenId, recordAgentReputation, agentTokenIds,
+  resolveAgentTokenId, recordAgentReputation, agentTokenIds, agentHasIdentity,
   getTreasuryUsdcBalance, houseAgentResearch, executeAgentTrade,
   researchQuestion, llmComplete, parseLlmJson, formatForApp,
   keccak256, toHex, encodeFunctionData, parseAbiItem, stringToHex,
