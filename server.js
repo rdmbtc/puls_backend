@@ -5330,9 +5330,10 @@ Respond with ONE JSON object only:
 {"actions":[ ...zero or more... ],"reply":"<your analysis / explanation, grounded in the research>"}
 Each action is exactly one of:
 - {"type":"buy","market":"<full market question or slug>","side":"YES"|"NO","usdc":<number>}   // buy shares in a prediction market
-- {"type":"buy_signal","query":"<topic, or 'top' for the best one>"}                            // pay another forecaster for premium alpha (x402)
+- {"type":"buy_signal","query":"<topic, or 'top' for the best one>","tradeUsdc":<number, optional>}                            // pay another forecaster for premium alpha (x402)
 Rules:
 - "top market" / "best one" / "first" / "#1" ALWAYS means market #1 in the numbered list above. For a signal, "top signal"/"best signal" means use query "top".
+- If the user wants to buy a signal AND bet/stake on its pick (e.g. "buy the top signal and put $2 on it", "buy $2 into its market"), return ONE buy_signal action with tradeUsdc set to the stake — NOT a separate buy (you don't know the signal's market until it's bought; I reveal it and place the trade on the signal's side).
 - If the user asks to buy SEVERAL markets in one message, return one "buy" action per market, each with its amount.
 - "market" may be ANY real prediction market the user names (e.g. "Will Spain reach the Round of 16 at the 2026 FIFA World Cup?", "Will BTC close above $100k by 2026-12-31"). Honor the amounts they give.
 - Decide YES/NO from your reasoning + the research (and any signal the user told you to act on).
@@ -5363,7 +5364,7 @@ Output ONLY the JSON object.`;
       const ref = a.market || a.slug || '';
       if ((a.type === 'buy' || !a.type) && ref && !feedBySlug[ref] && !deployedMarketsCache.has(ref)
           && /\bsignal|alpha|forecast\b/i.test(`${ref} ${message}`)) {
-        return { type: 'buy_signal', query: a.query || ref };
+        return { type: 'buy_signal', query: a.query || ref, tradeUsdc: a.usdc ?? a.usdcAmount };
       }
       return a;
     });
@@ -5382,7 +5383,20 @@ Output ONLY the JSON object.`;
         if (r.ok) {
           spentNow += r.price; budgetLeft -= r.price;
           const who = (String(r.signal.creator_user_id || '').replace(/^agent_(swarm_)?/, '').replace(/^./, (c) => c.toUpperCase())) || 'a forecaster';
-          signalsBought.push({ id: r.signal.id, title: r.signal.title, price: r.price, txId: r.txId, stance: r.signal.stance || null, thesis: r.signal.thesis || null, marketQuestion: r.signal.market_question || null });
+          signalsBought.push({ id: r.signal.id, title: r.signal.title, price: r.price, txId: r.txId, stance: r.signal.stance || null, thesis: r.signal.thesis || null, marketQuestion: r.signal.market_question || null, marketSlug: r.signal.market_slug || null });
+          // Follow through: if the user wants to STAKE on the signal's pick, the
+          // signal now reveals its market + side — place that trade on-chain.
+          const _stake = parseFloat(act.tradeUsdc ?? act.stakeUsdc ?? act.usdc);
+          const _sigRef = r.signal.market_slug || r.signal.market_question || '';
+          if (_stake > 0 && _sigRef && budgetLeft >= _stake - 1e-9) {
+            const _sigSide = String(r.signal.stance || '').toUpperCase() === 'NO' ? 'NO' : 'YES';
+            let _sm = resolvePositionalMarket(_sigRef, '', feed) || await resolveMarketByName(_sigRef, feed);
+            if (_sm) {
+              const _tr = await execAgentTrade(userId, agent, _sm, _sigSide, _stake);
+              if (_tr.ok) { spentNow += _stake; budgetLeft -= _stake; trades.push(_tr.trade); notes.push(`• acted on it — ${_sigSide} $${_stake} on "${_sm.question || _sm.slug}"`); }
+              else notes.push(`• bought the signal but couldn't stake on its market — ${_tr.error}`);
+            } else notes.push(`• bought the signal; couldn't locate its market to stake $${_stake}`);
+          }
           notes.push(`• bought signal “${r.signal.title}”${r.signal.stance ? ' (' + r.signal.stance + ')' : ''} from ${who} · $${r.price.toFixed(3)} x402`);
         } else notes.push(`• couldn't buy a signal — ${r.reason}`);
       } else {
