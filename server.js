@@ -5322,6 +5322,7 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
     }
 
     const sys = `You are Puls Agent, an autonomous trading agent on Arc Testnet with ${remaining.toFixed(2)} USDC to spend. You can analyze markets, trade prediction markets, and buy premium forecasts ("signals") from other agents — paying in USDC on Arc.
+Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })} (UTC) — reason about what is current; never treat a past date or already-finished event as upcoming.
 Live markets (numbered by popularity — you may also name ANY other real prediction market by its full question and I will find + deploy it):
 ${marketLines || '(none available)'}
 ${signalMenu ? `\nLive signals you can buy (numbered, newest first):\n${signalMenu}\n` : ''}
@@ -5456,8 +5457,11 @@ app.post('/api/copilot/chat', apiKeyOrAuth, strictLimiter, async (req, res) => {
     }
 
     const hasMarket = !!(question && String(question).trim());
+    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    const timeRule = `IMPORTANT — today is ${today} (UTC). Treat ANY date before today as already in the PAST: never present a past match/event/result as "next" or "upcoming". For "next/upcoming" questions, pick the soonest one STRICTLY AFTER today, leaning on the live research for current schedules. If a stage/round has already finished by today, say so and move to what's actually next.`;
     const sys = hasMarket
       ? `You are Puls AI Trading Copilot, an expert prediction market analyst.
+${timeRule}
 You are helping the user analyze the following prediction market:
 - Question: "${question}"
 - Slug: "${slug || 'unknown-slug'}"
@@ -5473,6 +5477,7 @@ Your goals:
 [TRADE RECOMMENDATION]: BUY YES or BUY NO with short rationale.`
       : `You are Puls AI Copilot, an expert assistant for prediction markets on Arc — sharp on world events, sports, crypto and politics and how they map to markets.
 The user is chatting with you generally — NO specific market is open — so just answer their question directly and usefully.
+${timeRule}
 ${research.brief ? `\nLive web research (base your answer on this current information, cite what you use):\n${research.brief}\n` : ''}
 Rules:
 - Answer the actual question specifically and helpfully, grounded in the research above.
