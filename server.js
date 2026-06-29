@@ -1912,7 +1912,7 @@ app.get('/api/market/price-history', async (req, res) => {
 
 // ── Trade ─────────────────────────────────────────────────────────────────────
 
-app.post('/api/trade/buy', authenticateUser, requireVerifiedUser, tradeLimiter, async (req, res) => {
+app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, async (req, res) => {
   try {
     const { userId, side, usdcAmount, question, slug, deadline } = req.body;
     if (!userId || !side || !usdcAmount || !slug || !deadline) return res.status(400).json({ error: 'Missing fields' });
@@ -2033,7 +2033,7 @@ app.post('/api/trade/buy', authenticateUser, requireVerifiedUser, tradeLimiter, 
   }
 });
 
-app.post('/api/trade/sell', authenticateUser, requireVerifiedUser, tradeLimiter, async (req, res) => {
+app.post('/api/trade/sell', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, async (req, res) => {
   try {
     const { userId, side, shares, question, slug, contractAddress: reqContract, owner } = req.body;
     if (!userId || !side || !shares) return res.status(400).json({ error: 'Missing fields' });
@@ -2088,7 +2088,7 @@ app.post('/api/trade/sell', authenticateUser, requireVerifiedUser, tradeLimiter,
 
 // Batch-claim every resolved + won + unclaimed position for the user. One tap
 // → multiple on-chain claim() txs, a powerful "come back and collect" hook.
-app.post('/api/trade/claim-all', authenticateUser, requireVerifiedUser, strictLimiter, async (req, res) => {
+app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ error: 'Missing fields' });
@@ -2140,7 +2140,7 @@ app.post('/api/trade/claim-all', authenticateUser, requireVerifiedUser, strictLi
   }
 });
 
-app.post('/api/trade/claim', authenticateUser, requireVerifiedUser, strictLimiter, async (req, res) => {
+app.post('/api/trade/claim', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
     const { userId, slug, contractAddress: reqContract } = req.body;
     if (!userId) return res.status(400).json({ error: 'Missing fields' });
