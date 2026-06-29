@@ -5458,7 +5458,8 @@ app.post('/api/copilot/chat', apiKeyOrAuth, strictLimiter, async (req, res) => {
 
     const hasMarket = !!(question && String(question).trim());
     const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
-    const timeRule = `IMPORTANT — today is ${today} (UTC). Treat ANY date before today as already in the PAST: never present a past match/event/result as "next" or "upcoming". For "next/upcoming" questions, pick the soonest one STRICTLY AFTER today, leaning on the live research for current schedules. If a stage/round has already finished by today, say so and move to what's actually next.`;
+    const timeRule = `IMPORTANT — today is ${today} (UTC). Treat ANY date before today as already in the PAST: never present a past match/event/result as "next" or "upcoming". For "next/upcoming" questions, pick the soonest one STRICTLY AFTER today, leaning on the live research for current schedules. If a stage/round has already finished by today, say so and move to what's actually next.
+GROUNDING — state a concrete fact (opponent, date, time, venue, round, price, number) ONLY if it actually appears in the live research below, and cite it. Never invent or "best-guess" a specific fixture/date/venue: if the research doesn't clearly pin it down, say what you DO see and that the exact detail isn't confirmed there. A wrong specific is worse than an honest "not confirmed".`;
     const sys = hasMarket
       ? `You are Puls AI Trading Copilot, an expert prediction market analyst.
 ${timeRule}
