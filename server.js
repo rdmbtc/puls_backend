@@ -2136,6 +2136,16 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
           walletId, contractAddress: m, abiFunctionSignature: 'claim()', abiParameters: [],
           fee: { type: 'level', config: { feeLevel: 'HIGH' } },
         });
+        
+        await supabase.from('trades').insert({
+          user_id: userId,
+          market_id: m,
+          side: 'CLAIM',
+          usdc_amount: 0,
+          tx_id: txRes.data.id,
+          state: txRes.data.state || 'INITIATED'
+        });
+
         claimed.push({ market: m, txId: txRes.data.id });
         awardPoints(userId, 'win', { refType: 'claim', refId: `${m}-${txRes.data.id}` }).catch(() => {});
       } catch (e) {
@@ -2172,6 +2182,15 @@ app.post('/api/trade/claim', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
       abiFunctionSignature: 'claim()',
       abiParameters: [],
       fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+    });
+
+    await supabase.from('trades').insert({
+      user_id: userId,
+      market_id: contractAddress,
+      side: 'CLAIM',
+      usdc_amount: 0,
+      tx_id: txRes.data.id,
+      state: txRes.data.state || 'INITIATED'
     });
 
     (async () => { try {
@@ -7449,6 +7468,7 @@ if (HOUSE_AGENT) {
 // trade predictions like humans, and comment on markets — powering AI vs Humans.
 // Env-gated (AGENT_SWARM=true); reuses the house-agent plumbing, never touches it.
 const swarm = registerSwarm(app, {
+  authenticateUser, requireVerifiedUser, strictLimiter,
   supabase, circle, walletClient, publicClient, adminAccount,
   getWalletId, saveWallet, getWalletInfo, ensureWalletSet, WALLET_ACCOUNT_TYPE,
   USDC, IDENTITY_REGISTRY, AGENT_METADATA_URI, SIGNAL_REGISTRY_ADDRESS,
