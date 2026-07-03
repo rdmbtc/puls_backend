@@ -1697,16 +1697,26 @@ app.get('/api/markets', async (req, res) => {
       };
     }));
 
-    const mergedList = [...customList, ...pmMergedList];
+    const mergedList = [...customList, ...pmMergedList]
+      .map((m) => ({ ...m, ...pulsActivity(m) }));
 
-    // Sort: deployed (pre-warmed) markets first for instant trades
-    mergedList.sort((a, b) => {
-      const aDep = a.contractAddress ? 1 : 0;
-      const bDep = b.contractAddress ? 1 : 0;
-      return bDep - aDep;
+    // Filter out markets with EXACTLY 1 holder (meaning only the creator bought it).
+    // We MUST keep markets with 0 holders (undeployed or untouched polymarket feed).
+    const filteredList = mergedList.filter(m => m.pulsHolders !== 1);
+
+    // Sort:
+    // 1. Markets where Agents/Humans are sitting (>1 holders) go to the very top, sorted by holder count.
+    // 2. Everything else (0 holders) stays in its original Polymarket volume order.
+    filteredList.sort((a, b) => {
+      const aActive = a.pulsHolders > 1 ? a.pulsHolders : 0;
+      const bActive = b.pulsHolders > 1 ? b.pulsHolders : 0;
+      if (aActive !== bActive) {
+        return bActive - aActive;
+      }
+      return 0; // Preserve original Polymarket sorting for the rest
     });
 
-    res.json(mergedList.map((m) => ({ ...m, ...pulsActivity(m) })));
+    res.json(filteredList);
   } catch (e) {
     console.error('/api/markets error:', e.message);
     res.status(500).json({ error: e.message });
@@ -2363,65 +2373,58 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
           const holders = []; // { owner: 'user'|'agent', address, yesShares, noShares }
 
           try {
-            for (const addr of scanAddresses) {
-              const [yesSharesRaw, noSharesRaw, claimedRaw] = await publicClient.readContract({
-                address: marketAddress,
-                abi: [{
-                  name: 'getUserPosition',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [{ name: 'user', type: 'address' }],
-                  outputs: [
-                    { name: '_yesShares', type: 'uint256' },
-                    { name: '_noShares', type: 'uint256' },
-                    { name: '_claimed', type: 'bool' }
-                  ]
-                }],
-                functionName: 'getUserPosition',
-                args: [addr]
-              });
-              const y = Number(yesSharesRaw) / 1_000_000;
-              const n = Number(noSharesRaw) / 1_000_000;
-              yesShares += y;
-              noShares += n;
-              if (claimedRaw) claimed = true;
-              if (y > 0.0001 || n > 0.0001) {
-                holders.push({
-                  owner: agentAddress && addr.toLowerCase() === agentAddress.toLowerCase() ? 'agent' : 'user',
-                  address: addr,
-                  yesShares: y,
-                  noShares: n,
-                });
-              }
-            }
-            rpcPositionSuccess = true;
-          } catch (rpcErr) {
-            console.error(`[RPC Fallback] Failed to read position from contract for user ${userAddress} on market ${marketAddress}:`, rpcErr.message);
-            // Fallback: estimate positions from trades in database
+            // Bypass RPC for rendering speed: Calculate positions purely from DB trades
             const completedTrades = rows.filter(r => r.state === 'COMPLETE' && r.market_id === marketAddress);
-            const yesTrades = completedTrades.filter(r => r.side === 'YES');
-            const noTrades = completedTrades.filter(r => r.side === 'NO');
+            const yesTrades = completedTrades.filter(r => r.side === 'YES' || r.side === 'SELL');
+            const noTrades = completedTrades.filter(r => r.side === 'NO' || r.side === 'SELL');
 
+            // Calculate YES shares (buy adds, sell subtracts)
             yesTrades.forEach(r => {
-              const amt = parseFloat(r.usdc_amount ?? 0);
-              const price = parseFloat(r.entry_price ?? 0.5) || 0.5;
-              yesShares += amt / price;
+              if (r.side === 'SELL') {
+                if (r.outcome === 'YES') {
+                  const amt = parseFloat(r.usdc_amount ?? 0);
+                  const price = parseFloat(r.entry_price ?? 0.5) || 0.5;
+                  yesShares -= amt / price;
+                }
+              } else {
+                const amt = parseFloat(r.usdc_amount ?? 0);
+                const price = parseFloat(r.entry_price ?? 0.5) || 0.5;
+                yesShares += amt / price;
+              }
             });
             
+            // Calculate NO shares (buy adds, sell subtracts)
             noTrades.forEach(r => {
-              const amt = parseFloat(r.usdc_amount ?? 0);
-              const price = parseFloat(r.entry_price ?? 0.5) || 0.5;
-              noShares += amt / price;
+              if (r.side === 'SELL') {
+                if (r.outcome === 'NO') {
+                  const amt = parseFloat(r.usdc_amount ?? 0);
+                  const price = parseFloat(r.entry_price ?? 0.5) || 0.5;
+                  noShares -= amt / price;
+                }
+              } else {
+                const amt = parseFloat(r.usdc_amount ?? 0);
+                const price = parseFloat(r.entry_price ?? 0.5) || 0.5;
+                noShares += amt / price;
+              }
             });
 
-            if (yesShares < 0) yesShares = 0;
-            if (noShares < 0) noShares = 0;
+            if (yesShares < 0.0001) yesShares = 0;
+            if (noShares < 0.0001) noShares = 0;
             
             claimed = completedTrades.some(r => r.side === 'CLAIM');
-            // Can't attribute a holder from DB alone → assume user wallet.
+            
+            // If already claimed, the shares are burned on-chain.
+            if (claimed) {
+              yesShares = 0;
+              noShares = 0;
+            }
+            
+            // Attribute to user wallet if there is a position
             if (yesShares > 0.0001 || noShares > 0.0001) {
               holders.push({ owner: 'user', address: userAddress, yesShares, noShares });
             }
+          } catch (dbErr) {
+            console.error(`Failed to calculate position from DB for user ${userAddress} on market ${marketAddress}:`, dbErr.message);
           }
 
           if (yesShares < 0.0001 && noShares < 0.0001) return;
@@ -2436,64 +2439,10 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
           if (cached && cached.resolved) {
             resolved = true;
             outcome = cached.outcome;
-          } else {
-            try {
-              const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
-                address: marketAddress,
-                abi: [{
-                  name: 'getMarketInfo',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [
-                    { name: '_slug', type: 'string' },
-                    { name: '_deadline', type: 'uint256' },
-                    { name: '_resolved', type: 'bool' },
-                    { name: '_outcome', type: 'bool' },
-                    { name: '_yesOutstanding', type: 'uint256' },
-                    { name: '_noOutstanding', type: 'uint256' }
-                  ]
-                }],
-                functionName: 'getMarketInfo'
-              });
-              resolved = resolvedOnChain;
-              outcome = outcomeOnChain;
-              
-              // Self-heal DB and cache if it resolved on-chain but not in DB
-              const slugVal = slug || slugOnChain || '';
-              if (slugVal) {
-                const cachedEntry = deployedMarketsCache.get(slugVal);
-                if (resolved && (!cachedEntry || !cachedEntry.resolved)) {
-                  if (cachedEntry) {
-                    cachedEntry.resolved = true;
-                    cachedEntry.outcome = outcome;
-                  } else {
-                    deployedMarketsCache.set(slugVal, {
-                      contractAddress: marketAddress,
-                      deadline: Number(deadlineOnChain),
-                      resolved: true,
-                      outcome
-                    });
-                  }
-                  supabase
-                    .from('deployed_markets')
-                    .update({ resolved: true, outcome })
-                    .eq('contract_address', marketAddress)
-                    .then(({ error }) => {
-                      if (error) console.error(`[Self-Heal Error] Failed to update db resolved state for ${slugVal}:`, error.message);
-                      else console.log(`[Self-Heal Success] Updated resolved state in DB for ${slugVal}`);
-                    });
-                }
-              }
-            } catch (err) {
-              console.error(`Failed to read market info from contract for ${marketAddress}:`, err.message);
-              // Fallback to cache if contract call fails
-              if (cached) {
-                resolved = cached.resolved;
-                outcome = cached.outcome;
-              }
-            }
           }
+          // For max portfolio render speed, we DO NOT poll the blockchain here.
+          // The cache/DB handles resolution state.
+
 
           const tradeForMarket = rows.find(r => r.market_id === marketAddress);
           if (tradeForMarket && tradeForMarket.question) {
@@ -4628,7 +4577,7 @@ async function persistTokenId(agentKey, tokenId, address) {
 // Once found, the id is persisted so it never churns even after the mint ages
 // out of the scan window. Returns the most recent mint (matches what was shown).
 const ERC8004_SCAN_CHUNK = 9000n;            // per-call getLogs range (RPC caps ~10k)
-const ERC8004_SCAN_CHUNKS = Math.max(1, parseInt(process.env.ERC8004_SCAN_CHUNKS || '8', 10));
+const ERC8004_SCAN_CHUNKS = Math.max(1, parseInt(process.env.ERC8004_SCAN_CHUNKS || '112', 10));
 async function resolveAgentTokenId(agentKey, agentAddress) {
   if (agentTokenIds.has(agentKey)) return agentTokenIds.get(agentKey);
   const persisted = await getPersistedTokenId(agentKey);
@@ -7377,7 +7326,7 @@ async function getHouseAgentAddress() {
 let _economyFeedCache = { at: 0, data: null };
 app.get('/api/economy/feed', generalLimiter, async (req, res) => {
   try {
-    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '30', 10)));
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || '30', 10)));
     if (_economyFeedCache.data && Date.now() - _economyFeedCache.at < ECONOMY_FEED_TTL_MS) {
       return res.json({ ..._economyFeedCache.data, feed: _economyFeedCache.data.feed.slice(0, limit), cached: true });
     }
