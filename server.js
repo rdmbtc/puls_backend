@@ -2540,6 +2540,7 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
             if (claimed) { yesShares = 0; noShares = 0; }
           }
           
+          if (claimed) { yesShares = 0; noShares = 0; }
           if (yesShares < 0.0001) yesShares = 0;
           if (noShares < 0.0001) noShares = 0;
           
