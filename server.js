@@ -2180,8 +2180,22 @@ app.post('/api/trade/claim', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
     const { userId, slug, contractAddress: reqContract } = req.body;
     if (!userId) return res.status(400).json({ error: 'Missing fields' });
 
-    const walletId = await getWalletId(userId);
-    if (!walletId) return res.status(400).json({ error: 'No wallet' });
+    // We need to check both the user's wallet and their agent's wallet
+    const wallets = [];
+    const mainWalletId = await getWalletId(userId);
+    if (mainWalletId) {
+      const addr = await getWalletInfo(mainWalletId).then(info => info.address).catch(() => null);
+      if (addr) wallets.push({ id: mainWalletId, address: addr, suffix: '' });
+    }
+    try {
+      const agentWalletId = await getWalletId(`agent_${userId}`);
+      if (agentWalletId) {
+        const addr = await getWalletInfo(agentWalletId).then(info => info.address).catch(() => null);
+        if (addr) wallets.push({ id: agentWalletId, address: addr, suffix: '_AGENT' });
+      }
+    } catch (_) {}
+
+    if (wallets.length === 0) return res.status(400).json({ error: 'No wallets found' });
 
     // Prefer the position's own contract; fall back to slug -> cache.
     let contractAddress = (reqContract && /^0x[0-9a-fA-F]{40}$/.test(reqContract)) ? reqContract : null;
@@ -2191,29 +2205,60 @@ app.post('/api/trade/claim', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
       contractAddress = cached.contractAddress;
     }
 
-    const txRes = await circle.createContractExecutionTransaction({
-      walletId,
-      contractAddress: contractAddress,
-      abiFunctionSignature: 'claim()',
-      abiParameters: [],
-      fee: { type: 'level', config: { feeLevel: 'HIGH' } },
-    });
+    const posAbi = [{ name: 'getUserPosition', type: 'function', stateMutability: 'view',
+      inputs: [{ name: 'user', type: 'address' }],
+      outputs: [{ name: '_yes', type: 'uint256' }, { name: '_no', type: 'uint256' }, { name: '_claimed', type: 'bool' }] }];
+    const infoAbi = [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [], outputs: [
+      { name: '_slug', type: 'string' }, { name: '_deadline', type: 'uint256' },
+      { name: '_resolved', type: 'bool' }, { name: '_outcome', type: 'bool' },
+      { name: '_y', type: 'uint256' }, { name: '_n', type: 'uint256' } ] }];
 
-    await supabase.from('trades').insert({
-      user_id: userId,
-      market_id: contractAddress,
-      side: 'CLAIM',
-      usdc_amount: 0,
-      tx_id: txRes.data.id,
-      state: txRes.data.state || 'INITIATED'
-    });
+    const claimed = [];
+    for (const wallet of wallets) {
+      try {
+        const [pos, info] = await Promise.all([
+          publicClient.readContract({ address: contractAddress, abi: posAbi, functionName: 'getUserPosition', args: [wallet.address] }),
+          publicClient.readContract({ address: contractAddress, abi: infoAbi, functionName: 'getMarketInfo' }),
+        ]);
+        const yes = Number(pos[0]) / 1e6, no = Number(pos[1]) / 1e6, isClaimed = pos[2];
+        const resolved = info[2], outcome = info[3];
+        if (!resolved || isClaimed) continue;
+        const won = outcome ? yes > 0.0001 : no > 0.0001;
+        if (!won) continue;
 
-    (async () => { try {
-      await touchStreak(userId);
-      await awardPoints(userId, 'win', { refType: 'claim', refId: `${contractAddress}-${txRes.data.id}` });
-    } catch (_) {} })();
+        const txRes = await circle.createContractExecutionTransaction({
+          walletId: wallet.id,
+          contractAddress: contractAddress,
+          abiFunctionSignature: 'claim()',
+          abiParameters: [],
+          fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+        });
 
-    res.json({ txId: txRes.data.id, state: txRes.data.state });
+        await supabase.from('trades').insert({
+          user_id: wallet.suffix ? `agent_${userId}` : userId,
+          market_id: contractAddress,
+          side: 'CLAIM',
+          usdc_amount: 0,
+          tx_id: txRes.data.id,
+          state: txRes.data.state || 'INITIATED'
+        });
+
+        claimed.push({ txId: txRes.data.id, state: txRes.data.state, walletId: wallet.id });
+      } catch (e) {
+        console.warn(`[claim] ${contractAddress} for ${wallet.address} skipped:`, e.message);
+      }
+    }
+
+    if (claimed.length > 0) {
+      (async () => { try {
+        await touchStreak(userId);
+        await awardPoints(userId, 'win', { refType: 'claim', refId: `${contractAddress}-${claimed[0].txId}` });
+      } catch (_) {} })();
+      res.json({ ok: true, claimed: claimed.length, items: claimed, txId: claimed[0].txId, state: claimed[0].state });
+    } else {
+      res.json({ ok: false, claimed: 0, error: 'No claimable positions found for this market.' });
+    }
+
   } catch (e) {
     console.error('claim error:', e.message);
     res.status(500).json({ error: e.message });
