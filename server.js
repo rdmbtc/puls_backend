@@ -2102,14 +2102,27 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
   try {
     const { userId } = req.body;
     if (!userId) return res.status(400).json({ error: 'Missing fields' });
-    const walletId = await getWalletId(userId);
-    if (!walletId) return res.status(400).json({ error: 'No wallet' });
-    const addr = userIdToAddressCache.get(userId) || (walletId ? (await getWalletInfo(walletId)).address : null);
-    if (!addr) return res.status(400).json({ error: 'No wallet address' });
+    
+    // We need to check both the user's wallet and their agent's wallet
+    const wallets = [];
+    const mainWalletId = await getWalletId(userId);
+    if (mainWalletId) {
+      const addr = await getWalletInfo(mainWalletId).then(info => info.address).catch(() => null);
+      if (addr) wallets.push({ id: mainWalletId, address: addr, suffix: '' });
+    }
+    try {
+      const agentWalletId = await getWalletId(`agent_${userId}`);
+      if (agentWalletId) {
+        const addr = await getWalletInfo(agentWalletId).then(info => info.address).catch(() => null);
+        if (addr) wallets.push({ id: agentWalletId, address: addr, suffix: '_AGENT' });
+      }
+    } catch (_) {}
+
+    if (wallets.length === 0) return res.status(400).json({ error: 'No wallets found' });
 
     // Candidate markets: ones the user has traded.
     const { data: rows } = await supabase
-      .from('trades').select('market_id').eq('user_id', userId).eq('state', 'COMPLETE');
+      .from('trades').select('market_id').in('user_id', [userId, `agent_${userId}`]).eq('state', 'COMPLETE');
     const markets = [...new Set((rows || []).map(r => r.market_id).filter(m => m && m.startsWith('0x')))];
 
     const posAbi = [{ name: 'getUserPosition', type: 'function', stateMutability: 'view',
@@ -2122,34 +2135,36 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
 
     const claimed = [];
     for (const m of markets) {
-      try {
-        const [pos, info] = await Promise.all([
-          publicClient.readContract({ address: m, abi: posAbi, functionName: 'getUserPosition', args: [addr] }),
-          publicClient.readContract({ address: m, abi: infoAbi, functionName: 'getMarketInfo' }),
-        ]);
-        const yes = Number(pos[0]) / 1e6, no = Number(pos[1]) / 1e6, isClaimed = pos[2];
-        const resolved = info[2], outcome = info[3];
-        if (!resolved || isClaimed) continue;
-        const won = outcome ? yes > 0.0001 : no > 0.0001;
-        if (!won) continue;
-        const txRes = await circle.createContractExecutionTransaction({
-          walletId, contractAddress: m, abiFunctionSignature: 'claim()', abiParameters: [],
-          fee: { type: 'level', config: { feeLevel: 'HIGH' } },
-        });
-        
-        await supabase.from('trades').insert({
-          user_id: userId,
-          market_id: m,
-          side: 'CLAIM',
-          usdc_amount: 0,
-          tx_id: txRes.data.id,
-          state: txRes.data.state || 'INITIATED'
-        });
+      for (const wallet of wallets) {
+        try {
+          const [pos, info] = await Promise.all([
+            publicClient.readContract({ address: m, abi: posAbi, functionName: 'getUserPosition', args: [wallet.address] }),
+            publicClient.readContract({ address: m, abi: infoAbi, functionName: 'getMarketInfo' }),
+          ]);
+          const yes = Number(pos[0]) / 1e6, no = Number(pos[1]) / 1e6, isClaimed = pos[2];
+          const resolved = info[2], outcome = info[3];
+          if (!resolved || isClaimed) continue;
+          const won = outcome ? yes > 0.0001 : no > 0.0001;
+          if (!won) continue;
+          const txRes = await circle.createContractExecutionTransaction({
+            walletId: wallet.id, contractAddress: m, abiFunctionSignature: 'claim()', abiParameters: [],
+            fee: { type: 'level', config: { feeLevel: 'HIGH' } },
+          });
+          
+          await supabase.from('trades').insert({
+            user_id: wallet.suffix ? `agent_${userId}` : userId,
+            market_id: m,
+            side: 'CLAIM',
+            usdc_amount: 0,
+            tx_id: txRes.data.id,
+            state: txRes.data.state || 'INITIATED'
+          });
 
-        claimed.push({ market: m, txId: txRes.data.id });
-        awardPoints(userId, 'win', { refType: 'claim', refId: `${m}-${txRes.data.id}` }).catch(() => {});
-      } catch (e) {
-        console.warn(`[claim-all] ${m} skipped:`, e.message);
+          claimed.push({ market: m, txId: txRes.data.id, walletId: wallet.id });
+          awardPoints(userId, 'win', { refType: 'claim', refId: `${m}-${txRes.data.id}` }).catch(() => {});
+        } catch (e) {
+          console.warn(`[claim-all] ${m} for ${wallet.address} skipped:`, e.message);
+        }
       }
     }
     if (claimed.length) touchStreak(userId).catch(() => {});
