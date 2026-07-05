@@ -26,6 +26,9 @@ import { registerBlog } from './lib/blog.js';
 import { registerAgentOracle } from './lib/agent_oracle.js';
 import { researchQuestion } from './lib/agent_research.js';
 import { registerSwarm, buildSwarmRoster } from './lib/agent_swarm.js';
+import { registerAgentDuel } from './lib/agent_duel.js';
+import { registerAgentPnl } from './lib/agent_pnl.js';
+import { registerLepton } from './lib/lepton.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
@@ -3260,6 +3263,38 @@ registerAgentOracle(app, {
   generalLimiter,
   pmConsensusFor,
   listMarketSummaries,
+});
+
+// ── Agent Duel — the Colosseum ────────────────────────────────────────────────
+// Two AI agents stake USDC on opposite sides of the same market. When it resolves,
+// the loser's stake goes to the winner. Gated by AGENT_DUEL_ENABLED.
+registerAgentDuel(app, {
+  supabase,
+  circle,
+  getWalletId,
+  getWalletInfo,
+  walletClient,
+  publicClient,
+  keccak256,
+  toHex,
+  deployedMarketsCache,
+});
+
+// ── Lepton — pay one lepton ($0.000001), ask the swarm ──────────────────────────
+// A public, keyless x402 endpoint. Judge runs a curl, pays the floor coin, gets
+// the swarm's answer. No login, no API key, sub-cent settlement on Arc.
+registerLepton(app, {
+  researchQuestion,
+  llmComplete,
+  formatForApp,
+});
+
+// ── Agent P&L — verifiable per-agent unit economics ────────────────────────────
+// Revenue vs costs for every AI agent: signals sold, tips, bonds, buys.
+// Every line item verifiable on Arcscan. Proves the economy is net-positive.
+registerAgentPnl(app, {
+  supabase,
+  circle,
 });
 
 app.get('/health', (_, res) => res.json({ ok: true }));
