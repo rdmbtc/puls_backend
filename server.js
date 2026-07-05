@@ -5179,10 +5179,10 @@ async function buySignalForUserAgent(userId, agent, query) {
   } catch (e) {
     return { ok: false, reason: `Payment failed: ${e.message}` };
   }
-  supabase.from('signal_unlocks').insert({
+  supabase.from('signal_unlocks').upsert({
     user_id: agentUserId, signal_id: signal.id, status: 'confirmed',
     amount_usdc: price, tx_id: txId, confirmed_at: new Date().toISOString(),
-  }).then(({ error }) => { if (error && !String(error.message).includes('duplicate')) console.warn('[agent/chat] unlock insert:', error.message); });
+  }, { onConflict: 'user_id, signal_id', ignoreDuplicates: true }).then(({ error }) => { if (error && !String(error.message).includes('duplicate')) console.warn('[agent/chat] unlock insert:', error.message); });
   supabase.from('creator_signals').update({
     unlocks_count: (signal.unlocks_count ?? 0) + 1,
     revenue_usdc: Number(signal.revenue_usdc ?? 0) + price,
@@ -7009,10 +7009,10 @@ async function houseAgentPayForAlpha(agentWalletId, agentAddress) {
     // If this was an agent-to-agent buy of a published Signal, record the unlock
     // so it counts as a real signal sale (analytics + exactly-once).
     if (counterparty === 'agent_sage' && signalId) {
-      supabase.from('signal_unlocks').insert({
+      supabase.from('signal_unlocks').upsert({
         user_id: HOUSE_AGENT_USER, signal_id: signalId, status: 'confirmed',
         amount_usdc: price, tx_id: txId, confirmed_at: new Date().toISOString(),
-      }).then(({ error }) => { if (error && !String(error.message).includes('duplicate')) console.warn('[Pulse] signal_unlock insert:', error.message); });
+      }, { onConflict: 'user_id, signal_id', ignoreDuplicates: true }).then(({ error }) => { if (error && !String(error.message).includes('duplicate')) console.warn('[Pulse] signal_unlock insert:', error.message); });
       supabase.from('creator_signals').select('unlocks_count, revenue_usdc').eq('id', signalId).maybeSingle()
         .then(({ data }) => {
           if (data) supabase.from('creator_signals').update({
