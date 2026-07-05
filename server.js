@@ -231,6 +231,16 @@ const authenticateUser = async (req, res, next) => {
 // record results via /api/trade/save-external (which verifies the tx sender).
 const requireVerifiedUser = (req, res, next) => {
   if (req.isWeb3Guest) {
+    const allowedPaths = [
+      '/api/signals/', 
+      '/api/alpha/', 
+      '/api/tips', 
+      '/api/agent/'
+    ];
+    if (allowedPaths.some(p => req.path.startsWith(p))) {
+      return next();
+    }
+    
     return res.status(403).json({
       error: 'This action requires a signed-in account. External wallets transact directly on-chain.',
     });
