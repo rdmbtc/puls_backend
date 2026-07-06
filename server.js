@@ -1713,18 +1713,19 @@ app.get('/api/markets', async (req, res) => {
     const mergedList = [...customList, ...pmMergedList]
       .map((m) => ({ ...m, ...pulsActivity(m) }));
 
-    // Filter out markets with EXACTLY 1 holder (meaning only the creator bought it).
-    // We MUST keep markets with 0 holders (undeployed or untouched polymarket feed).
-    const filteredList = mergedList.filter(m => m.pulsHolders !== 1);
+    // We want to show ALL markets, regardless of holder count.
+    // Agents buying a market for the first time will have 1 holder, we MUST show them!
+    const filteredList = mergedList;
 
     // Sort:
-    // 1. Markets where Agents/Humans are sitting (>1 holders) go to the very top, sorted by holder count.
+    // 1. Markets with ANY activity (holders > 0) go to the top, sorted by holder count, then trades.
     // 2. Everything else (0 holders) stays in its original Polymarket volume order.
     filteredList.sort((a, b) => {
-      const aActive = a.pulsHolders > 1 ? a.pulsHolders : 0;
-      const bActive = b.pulsHolders > 1 ? b.pulsHolders : 0;
-      if (aActive !== bActive) {
-        return bActive - aActive;
+      if (a.pulsHolders !== b.pulsHolders) {
+        return b.pulsHolders - a.pulsHolders;
+      }
+      if (a.pulsTrades !== b.pulsTrades) {
+        return b.pulsTrades - a.pulsTrades;
       }
       return 0; // Preserve original Polymarket sorting for the rest
     });
@@ -2374,13 +2375,19 @@ app.post('/api/trade/save-external', tradeLimiter, async (req, res) => {
 
 app.get('/api/trade/recent', async (req, res) => {
   try {
-    const { limit = 20 } = req.query;
+    const { limit = 20, marketId } = req.query;
     const limitNum = Math.min(100, parseInt(limit) || 20);
-    const { data, error } = await supabase
+    let query = supabase
       .from('trades')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(limitNum);
+      
+    if (marketId) {
+      query = query.eq('market_id', marketId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error('Error fetching recent trades:', error.message);
