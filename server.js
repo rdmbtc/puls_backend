@@ -913,8 +913,8 @@ async function getWalletId(userId) {
     .from('wallets')
     .select('wallet_id')
     .eq('user_id', userId)
-    .single();
-  return data?.wallet_id ?? null;
+    .limit(1);
+  return (data && data.length > 0) ? data[0].wallet_id : null;
 }
 
 async function saveWallet(userId, walletId) {
@@ -6516,9 +6516,9 @@ async function getAgentStrategy(userId) {
       .from('wallets')
       .select('strategy')
       .eq('user_id', `agent_${userId}`)
-      .single();
-    if (!error && data && data.strategy) {
-      return data.strategy;
+      .limit(1);
+    if (!error && data && data.length > 0 && data[0].strategy) {
+      return data[0].strategy;
     }
   } catch (_) {}
   return agentStrategies.get(userId) ?? 'NONE';
