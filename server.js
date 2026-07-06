@@ -1490,7 +1490,14 @@ async function getMarketActivityAgg() {
   const tradeAgg = {};   // market_id(lowercased) -> { trades, holders:Set, vol }
   const commentAgg = {}; // market id -> comment count
   try {
-    const { data: _tr } = await supabase.from('trades').select('market_id, user_id, usdc_amount');
+    // Supabase caps at 1000 rows by default without pagination. 
+    // We order by created_at descending to ensure we aggregate the most RECENT activity, 
+    // not the oldest trades from the start of the platform.
+    const { data: _tr } = await supabase
+      .from('trades')
+      .select('market_id, user_id, usdc_amount')
+      .order('created_at', { ascending: false })
+      .limit(2000);
     for (const t of (_tr || [])) {
       const k = (t.market_id || '').toLowerCase();
       if (!k) continue;
