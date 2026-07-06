@@ -1057,13 +1057,14 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
   }
 }
 
-async function getTrades(userId) {
+async function getTrades(userIds) {
+  const ids = Array.isArray(userIds) ? userIds : [userIds];
   const { data } = await supabase
     .from('trades')
     .select('*')
-    .eq('user_id', userId)
+    .in('user_id', ids)
     .order('created_at', { ascending: false })
-    .limit(50);
+    .limit(3000);
   return data ?? [];
 }
 
@@ -2143,7 +2144,8 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
 
     // Candidate markets: ones the user has traded.
     const { data: rows } = await supabase
-      .from('trades').select('market_id').in('user_id', [userId, `agent_${userId}`]).eq('state', 'COMPLETE');
+      .from('trades').select('market_id').in('user_id', [userId, `agent_${userId}`]).eq('state', 'COMPLETE')
+      .order('created_at', { ascending: false }).limit(3000);
     const markets = [...new Set((rows || []).map(r => r.market_id).filter(m => m && m.startsWith('0x')))];
 
     const posAbi = [{ name: 'getUserPosition', type: 'function', stateMutability: 'view',
@@ -2442,7 +2444,7 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
     } catch (_) {}
     const scanAddresses = [userAddress, agentAddress].filter(Boolean);
 
-    const rows = await getTrades(userId);
+    const rows = await getTrades([userId, `agent_${userId}`]);
 
     const terminalStates = ['COMPLETE', 'FAILED', 'CANCELLED', 'DENIED'];
     const pendingRows = rows.filter(r => !r.state || !terminalStates.includes(r.state.toUpperCase()));
