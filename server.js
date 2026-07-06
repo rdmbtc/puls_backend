@@ -5678,6 +5678,80 @@ app.post('/api/notifications/mark-read', authenticateUser, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// ── User-to-User Messages ────────────────────────────────────────────────────
+
+// GET /api/messages
+app.get('/api/messages', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+
+    const { data: messages, error } = await supabase
+      .from('comments')
+      .select('id, user_id, target_id, body, created_at')
+      .eq('target_type', 'dm')
+      .or(`user_id.eq.${userId},target_id.eq.${userId}`)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const conversations = new Map();
+    for (const msg of (messages || [])) {
+      const partnerId = msg.user_id === userId ? msg.target_id : msg.user_id;
+      if (!conversations.has(partnerId)) {
+        conversations.set(partnerId, msg);
+      }
+    }
+
+    res.json(Array.from(conversations.values()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/messages/:targetUserId
+app.get('/api/messages/:targetUserId', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    const targetUserId = req.params.targetUserId;
+    if (!userId || !targetUserId) return res.status(400).json({ error: 'userId and targetUserId required' });
+
+    const { data: messages, error } = await supabase
+      .from('comments')
+      .select('id, user_id, target_id, body, created_at')
+      .eq('target_type', 'dm')
+      .or(`and(user_id.eq.${userId},target_id.eq.${targetUserId}),and(user_id.eq.${targetUserId},target_id.eq.${userId})`)
+      .order('created_at', { ascending: true })
+      .limit(200);
+
+    if (error) throw error;
+    res.json(messages || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/messages/:targetUserId
+app.post('/api/messages/:targetUserId', authenticateUser, strictLimiter, async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    const targetUserId = req.params.targetUserId;
+    const body = String(req.body.body || '').trim();
+    if (!userId || !targetUserId || !body) return res.status(400).json({ error: 'userId, targetUserId, body required' });
+
+    const { data, error } = await supabase.from('comments').insert({
+      user_id: userId,
+      target_type: 'dm',
+      target_id: targetUserId,
+      body: body
+    }).select('id, user_id, target_id, body, created_at').single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── User-Created Markets ─────────────────────────────────────────────────────
 
@@ -7128,14 +7202,14 @@ function _todayKey() { return new Date().toISOString().slice(0, 10); }
 // remaining-daily budget. 0 means "can't size a trade now".
 function houseRiskSize(balance) {
   if (houseRisk.dayKey !== _todayKey()) { houseRisk.dayKey = _todayKey(); houseRisk.spentToday = 0; }
-  const remainingDaily = Math.max(0, HOUSE_AGENT_DAILY_CAP - houseRisk.spentToday);
-  if (remainingDaily < 0.1) return 0;
-  // Base 12% of bankroll, scaled up to +50% on a hot streak (capped), down after a loss.
   const streakMult = houseRisk.streak >= 3 ? 1.5 : houseRisk.streak === 2 ? 1.25 : houseRisk.streak <= -1 ? 0.6 : 1.0;
   let stake = (balance - 0.1) * 0.12 * streakMult;
-  stake = Math.min(stake, HOUSE_AGENT_MAX_TRADE, remainingDaily);
+  
+  if (stake < 0.1 && balance >= 0.2) stake = 0.1;
+  
+  stake = Math.min(stake, HOUSE_AGENT_MAX_TRADE);
   stake = Math.floor(stake * 10) / 10; // 0.1 USDC granularity
-  return stake >= 0.1 ? stake : 0;
+  return stake >= 0.1 ? stake : (balance >= 0.2 ? 0.1 : 0);
 }
 
 async function houseAgentDecide(candidates, balance, alpha = null, research = null) {
