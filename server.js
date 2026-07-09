@@ -7402,6 +7402,7 @@ async function houseAgentTick() {
         streak: decision.streak ?? null,
         txHash: result.txHash,
         contractAddress: decision.contractAddress,
+        slug: decision.slug || null,
         // Agent→creator nanopayment that fed this decision (if any).
         alphaPaid: alpha ? alpha.cost : null,
         alphaCreator: alpha ? alpha.creator : null,
