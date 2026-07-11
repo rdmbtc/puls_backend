@@ -5002,7 +5002,7 @@ app.post('/api/agent/start', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
             tokenAddress: USDC,
             blockchain: 'ARC-TESTNET',
             destinationAddress: agentAddress,
-            amount: [need.toFixed(6)],
+            amounts: [need.toFixed(6)],
             fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
           });
           funded = need;
@@ -5095,7 +5095,7 @@ app.post('/api/agent/deposit', authenticateUser, requireVerifiedUser, strictLimi
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: agent.address,
-      amount: [amt.toFixed(6)],
+      amounts: [amt.toFixed(6)],
       fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
     });
     // Wait for settle so the returned balance reflects the deposit.
@@ -5133,7 +5133,7 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: userAddress,
-      amount: [balance.toFixed(6)],
+      amounts: [balance.toFixed(6)],
       fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
     });
     res.json({ withdrawn: balance, txId: tx.data?.id });
@@ -5797,7 +5797,7 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: adminAccount.address,
-      amount: ['10.000000'],
+      amounts: ['10.000000'],
       fee: { type: 'level', config: { feeLevel: 'HIGH' } },
     });
     
