@@ -3328,6 +3328,28 @@ registerAgentPnl(app, {
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
+// ── Image Proxy ──────────────────────────────────────────────────────────────
+// Bypasses CORS restrictions for CanvasKit in Flutter Web.
+app.get('/api/image-proxy', async (req, res) => {
+  const imageUrl = req.query.url;
+  if (!imageUrl) return res.status(400).json({ error: 'URL required' });
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      return res.status(response.status).send('Failed to fetch image');
+    }
+    const contentType = response.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+    
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to proxy image', details: err.message });
+  }
+});
+
 // ── Dynamic OG share image for a market (SVG) ─────────────────────────────────
 // Rich link previews when a prediction is shared: question + YES/NO odds on the
 // brand gradient. SVG = no image libs, instant, cacheable. Used as og:image by
@@ -6204,6 +6226,87 @@ async function checkAndExecuteLimitOrders() {
     console.error('checkAndExecuteLimitOrders error:', e.message);
   }
 }
+
+// ── Support Tickets ─────────────────────────────────────────────────────────
+
+app.get('/api/support/tickets', authenticateUser, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('support_tickets')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('updated_at', { ascending: false });
+    if (error) throw error;
+    res.json({ tickets: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/support/tickets', authenticateUser, async (req, res) => {
+  try {
+    const { subject, body } = req.body;
+    if (!subject || !body) return res.status(400).json({ error: 'Subject and body required' });
+    
+    const { data: ticket, error: tErr } = await supabase
+      .from('support_tickets')
+      .insert({ user_id: req.user.id, subject, status: 'open' })
+      .select().single();
+    if (tErr) throw tErr;
+    
+    const { error: mErr } = await supabase
+      .from('support_messages')
+      .insert({ ticket_id: ticket.id, sender_id: req.user.id, body });
+    if (mErr) throw mErr;
+    
+    res.status(201).json({ ticket });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/support/tickets/:ticketId', authenticateUser, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('support_tickets')
+      .select('*')
+      .eq('id', req.params.ticketId)
+      .eq('user_id', req.user.id)
+      .single();
+    if (error) throw error;
+    res.json({ ticket: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/support/tickets/:ticketId/messages', authenticateUser, async (req, res) => {
+  try {
+    const { body } = req.body;
+    const ticketId = req.params.ticketId;
+    if (!body) return res.status(400).json({ error: 'Body required' });
+    
+    const { data: ticket, error: tErr } = await supabase
+      .from('support_tickets')
+      .select('id')
+      .eq('id', ticketId)
+      .eq('user_id', req.user.id)
+      .single();
+    if (tErr || !ticket) return res.status(403).json({ error: 'Forbidden' });
+    
+    const { data: message, error: mErr } = await supabase
+      .from('support_messages')
+      .insert({ ticket_id: ticketId, sender_id: req.user.id, body })
+      .select().single();
+    if (mErr) throw mErr;
+    
+    await supabase.from('support_tickets').update({ updated_at: new Date().toISOString() }).eq('id', ticketId);
+    
+    res.status(201).json({ message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Run matching engine every 20 seconds
 setInterval(checkAndExecuteLimitOrders, 20 * 1000);
