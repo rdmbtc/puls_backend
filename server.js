@@ -197,6 +197,7 @@ const authenticateUser = async (req, res, next) => {
       return res.status(401).json({ error: 'Unauthorized: Missing token' });
     }
     const token = authHeader.split(' ')[1];
+    console.log(`[Auth Middleware] Received token: ${token ? token.substring(0, 15) + '... (len: ' + token.length + ')' : 'null/empty'}`);
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) {
       console.error('[Auth Middleware] getUser failed:', error);
