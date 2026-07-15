@@ -1090,6 +1090,7 @@ async function getWalletInfo(walletId) {
     }
 
     let balance = '0.00';
+    let exactBalance = '0';
     try {
       const balanceRaw = await publicClient.readContract({
         address: USDC,
@@ -1103,6 +1104,7 @@ async function getWalletInfo(walletId) {
         functionName: 'balanceOf',
         args: [address]
       });
+      exactBalance = (Number(balanceRaw) / 1_000_000).toString();
       balance = (Number(balanceRaw) / 1_000_000).toFixed(2);
     } catch (err) {
       console.warn(`On-chain balance check failed for ${address}:`, err.message);
@@ -1111,11 +1113,12 @@ async function getWalletInfo(walletId) {
         const usdcToken = balRes.data.tokenBalances?.find(
           t => t.token?.address?.toLowerCase() === USDC.toLowerCase() || t.token?.symbol === 'USDC'
         );
-        balance = parseFloat(usdcToken?.amount ?? '0').toFixed(2);
+        exactBalance = usdcToken?.amount ?? '0';
+        balance = parseFloat(exactBalance).toFixed(2);
       } catch (_) {}
     }
 
-    return { walletId, address, usdcBalance: balance };
+    return { walletId, address, usdcBalance: balance, exactUsdcBalance: exactBalance };
   } catch (e) {
     console.error('getWalletInfo error:', e.message);
     return { walletId, address: '', usdcBalance: '0.00' };
@@ -4665,7 +4668,7 @@ async function getAgent(userId) {
   const walletId = await getWalletId(`agent_${userId}`);
   if (!walletId) return null;
   const info = await getWalletInfo(walletId);
-  return { walletId, address: info.address, balance: info.usdcBalance };
+  return { walletId, address: info.address, balance: info.usdcBalance, exactBalance: info.exactUsdcBalance };
 }
 
 // In-memory guard so we only register each agent on ERC-8004 once per process.
@@ -5091,6 +5094,7 @@ app.post('/api/agent/deposit', authenticateUser, requireVerifiedUser, strictLimi
     if (!userWalletId) return res.status(400).json({ error: 'No user wallet' });
 
     const tx = await circle.createTransaction({
+      idempotencyKey: crypto.randomUUID(),
       walletId: userWalletId,
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
@@ -5125,22 +5129,36 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
     const userWalletId = await getWalletId(userId);
     if (!userWalletId) return res.status(400).json({ error: 'No user wallet' });
     const userAddress = (await getWalletInfo(userWalletId)).address;
-    const balance = parseFloat(agent.balance) || 0;
-    if (balance < 0.01) return res.json({ withdrawn: 0, balance: 0 });
+
+    // Get the REAL balance from Circle SDK directly (not cached / RPC)
+    const balRes = await circle.getWalletTokenBalance({ id: agent.walletId });
+    const usdcToken = balRes.data.tokenBalances?.find(
+      t => t.token?.address?.toLowerCase() === USDC.toLowerCase() || t.token?.symbol === 'USDC'
+    );
+    const realBalance = parseFloat(usdcToken?.amount ?? '0');
+    console.log('[withdraw] walletId=' + agent.walletId + ' realBalance=' + realBalance + ' addr=' + agent.address + ' -> user=' + userAddress);
+
+    if (realBalance < 0.02) return res.json({ withdrawn: 0, balance: realBalance.toFixed(2) });
+
+    // Withdraw 90% of the balance to leave plenty for gas
+    const withdrawAmt = Math.floor((realBalance * 0.9) * 1_000_000) / 1_000_000;
+    console.log('[withdraw] withdrawAmt=' + withdrawAmt);
 
     const tx = await circle.createTransaction({
       walletId: agent.walletId,
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: userAddress,
-      amounts: [balance.toFixed(6)],
+      amounts: [withdrawAmt.toFixed(6)],
       fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
     });
-    res.json({ withdrawn: balance, txId: tx.data?.id });
+    console.log('[withdraw] tx created:', tx.data?.id);
+    res.json({ withdrawn: withdrawAmt, txId: tx.data?.id });
   } catch (e) {
     console.error('agent withdraw error:', e.message);
     res.status(500).json({ error: e.message });
   }
+
 });
 
 // Chat with the agent. The LLM returns a structured intent; the backend validates
