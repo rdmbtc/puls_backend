@@ -208,7 +208,7 @@ const authenticateUser = async (req, res, next) => {
         console.log('[Auth Middleware] Token Decode Error:', e.message);
       }
     }
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+    const { data: { user }, error } = await supabaseAnon.auth.getUser(token);
     if (error || !user) {
       console.error('[Auth Middleware] getUser failed:', error);
       return res.status(401).json({ error: 'Unauthorized: Invalid token' });
@@ -325,6 +325,11 @@ const circle = initiateDeveloperControlledWalletsClient({
 const supabase = createClient(
   process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
   process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : '' // use service_role key (server-side only)
+);
+
+const supabaseAnon = createClient(
+  process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
+  process.env.SUPABASE_ANON_KEY ? process.env.SUPABASE_ANON_KEY.trim() : '' 
 );
 
 const USDC = '0x3600000000000000000000000000000000000000';
