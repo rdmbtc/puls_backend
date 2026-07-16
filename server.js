@@ -5654,6 +5654,38 @@ Rules:
 
 // ── Push Notifications & In-App Notifications ─────────────────────────────────
 
+async function pingIndexNow(marketId) {
+  const apiKey = "8d263884d3d242a08882fa883908f00d"; 
+  const domain = "pulsmarket.tech";
+
+  const payload = {
+    host: domain,
+    key: apiKey,
+    keyLocation: `https://${domain}/${apiKey}.txt`,
+    urlList: [
+      `https://${domain}/market/${marketId}`
+    ]
+  };
+
+  try {
+    const response = await fetch('https://api.indexnow.org/indexnow', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (response.ok) {
+      console.log(`[IndexNow] 🚀 Успешно отправлен в индекс рынок: ${marketId}`);
+    } else {
+      console.error(`[IndexNow] ❌ Ошибка индексации: ${response.status} ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error(`[IndexNow] ❌ Ошибка сети при отправке:`, error);
+  }
+}
+
 async function createNotification(userId, title, message, type) {
   try {
     const { data, error } = await supabase
@@ -5909,6 +5941,9 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
       `Your custom market "${question}" has been deployed on Arc Testnet!`,
       'system'
     ).catch(console.error);
+
+    // Ping search engines
+    pingIndexNow(slug);
 
     res.json({ slug, contractAddress });
   } catch (e) {
