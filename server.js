@@ -6424,6 +6424,11 @@ app.post('/api/support/tickets/:ticketId/messages', authenticateUser, async (req
 // Run matching engine every 20 seconds
 setInterval(checkAndExecuteLimitOrders, 20 * 1000);
 
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain');
+  res.send('User-agent: *\nDisallow: /\n');
+});
+
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
