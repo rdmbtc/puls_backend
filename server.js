@@ -198,8 +198,20 @@ const authenticateUser = async (req, res, next) => {
       return res.status(401).json({ error: 'Unauthorized: Missing token' });
     }
     const token = authHeader.split(' ')[1];
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (token) {
+      try {
+        const parts = token.split('.');
+        if (parts.length >= 2) {
+          console.log('[Auth Middleware] Token Header:', Buffer.from(parts[0], 'base64').toString('utf8'));
+          console.log('[Auth Middleware] Token Payload:', Buffer.from(parts[1], 'base64').toString('utf8'));
+        }
+      } catch (e) {
+        console.log('[Auth Middleware] Token Decode Error:', e.message);
+      }
+    }
+    const { data: { user }, error } = await supabaseAnon.auth.getUser(token);
     if (error || !user) {
+      console.error('[Auth Middleware] getUser failed:', error);
       return res.status(401).json({ error: 'Unauthorized: Invalid token' });
     }
     req.user = user;
@@ -232,6 +244,16 @@ const authenticateUser = async (req, res, next) => {
 // record results via /api/trade/save-external (which verifies the tx sender).
 const requireVerifiedUser = (req, res, next) => {
   if (req.isWeb3Guest) {
+    const allowedPaths = [
+      '/api/signals/', 
+      '/api/alpha/', 
+      '/api/tips', 
+      '/api/agent/'
+    ];
+    if (allowedPaths.some(p => req.path.startsWith(p))) {
+      return next();
+    }
+    
     return res.status(403).json({
       error: 'This action requires a signed-in account. External wallets transact directly on-chain.',
     });
@@ -327,6 +349,10 @@ async function pingIndexNow(urls) {
   }
 }
 
+const supabaseAnon = createClient(
+  process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
+  process.env.SUPABASE_ANON_KEY ? process.env.SUPABASE_ANON_KEY.trim() : '' 
+);
 
 const USDC = '0x3600000000000000000000000000000000000000';
 let walletSetId = (process.env.WALLET_SET_ID || '').trim();
@@ -926,8 +952,8 @@ async function getWalletId(userId) {
     .from('wallets')
     .select('wallet_id')
     .eq('user_id', userId)
-    .single();
-  return data?.wallet_id ?? null;
+    .limit(1);
+  return (data && data.length > 0) ? data[0].wallet_id : null;
 }
 
 async function saveWallet(userId, walletId) {
@@ -1070,13 +1096,14 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
   }
 }
 
-async function getTrades(userId) {
+async function getTrades(userIds) {
+  const ids = Array.isArray(userIds) ? userIds : [userIds];
   const { data } = await supabase
     .from('trades')
     .select('*')
-    .eq('user_id', userId)
+    .in('user_id', ids)
     .order('created_at', { ascending: false })
-    .limit(50);
+    .limit(3000);
   return data ?? [];
 }
 
@@ -1102,6 +1129,7 @@ async function getWalletInfo(walletId) {
     }
 
     let balance = '0.00';
+    let exactBalance = '0';
     try {
       const balanceRaw = await publicClient.readContract({
         address: USDC,
@@ -1115,6 +1143,7 @@ async function getWalletInfo(walletId) {
         functionName: 'balanceOf',
         args: [address]
       });
+      exactBalance = (Number(balanceRaw) / 1_000_000).toString();
       balance = (Number(balanceRaw) / 1_000_000).toFixed(2);
     } catch (err) {
       console.warn(`On-chain balance check failed for ${address}:`, err.message);
@@ -1123,11 +1152,12 @@ async function getWalletInfo(walletId) {
         const usdcToken = balRes.data.tokenBalances?.find(
           t => t.token?.address?.toLowerCase() === USDC.toLowerCase() || t.token?.symbol === 'USDC'
         );
-        balance = parseFloat(usdcToken?.amount ?? '0').toFixed(2);
+        exactBalance = usdcToken?.amount ?? '0';
+        balance = parseFloat(exactBalance).toFixed(2);
       } catch (_) {}
     }
 
-    return { walletId, address, usdcBalance: balance };
+    return { walletId, address, usdcBalance: balance, exactUsdcBalance: exactBalance };
   } catch (e) {
     console.error('getWalletInfo error:', e.message);
     return { walletId, address: '', usdcBalance: '0.00' };
@@ -1503,7 +1533,14 @@ async function getMarketActivityAgg() {
   const tradeAgg = {};   // market_id(lowercased) -> { trades, holders:Set, vol }
   const commentAgg = {}; // market id -> comment count
   try {
-    const { data: _tr } = await supabase.from('trades').select('market_id, user_id, usdc_amount');
+    // Supabase caps at 1000 rows by default without pagination. 
+    // We order by created_at descending to ensure we aggregate the most RECENT activity, 
+    // not the oldest trades from the start of the platform.
+    const { data: _tr } = await supabase
+      .from('trades')
+      .select('market_id, user_id, usdc_amount')
+      .order('created_at', { ascending: false })
+      .limit(2000);
     for (const t of (_tr || [])) {
       const k = (t.market_id || '').toLowerCase();
       if (!k) continue;
@@ -1766,18 +1803,19 @@ app.get('/api/markets', async (req, res) => {
     const mergedList = [...customList, ...pmMergedList]
       .map((m) => ({ ...m, ...pulsActivity(m) }));
 
-    // Filter out markets with EXACTLY 1 holder (meaning only the creator bought it).
-    // We MUST keep markets with 0 holders (undeployed or untouched polymarket feed).
-    const filteredList = mergedList.filter(m => m.pulsHolders !== 1);
+    // We want to show ALL markets, regardless of holder count.
+    // Agents buying a market for the first time will have 1 holder, we MUST show them!
+    const filteredList = mergedList;
 
     // Sort:
-    // 1. Markets where Agents/Humans are sitting (>1 holders) go to the very top, sorted by holder count.
+    // 1. Markets with ANY activity (holders > 0) go to the top, sorted by holder count, then trades.
     // 2. Everything else (0 holders) stays in its original Polymarket volume order.
     filteredList.sort((a, b) => {
-      const aActive = a.pulsHolders > 1 ? a.pulsHolders : 0;
-      const bActive = b.pulsHolders > 1 ? b.pulsHolders : 0;
-      if (aActive !== bActive) {
-        return bActive - aActive;
+      if (a.pulsHolders !== b.pulsHolders) {
+        return b.pulsHolders - a.pulsHolders;
+      }
+      if (a.pulsTrades !== b.pulsTrades) {
+        return b.pulsTrades - a.pulsTrades;
       }
       return 0; // Preserve original Polymarket sorting for the rest
     });
@@ -2188,7 +2226,8 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
 
     // Candidate markets: ones the user has traded.
     const { data: rows } = await supabase
-      .from('trades').select('market_id').in('user_id', [userId, `agent_${userId}`]).eq('state', 'COMPLETE');
+      .from('trades').select('market_id').in('user_id', [userId, `agent_${userId}`]).eq('state', 'COMPLETE')
+      .order('created_at', { ascending: false }).limit(3000);
     const markets = [...new Set((rows || []).map(r => r.market_id).filter(m => m && m.startsWith('0x')))];
 
     const posAbi = [{ name: 'getUserPosition', type: 'function', stateMutability: 'view',
@@ -2427,13 +2466,19 @@ app.post('/api/trade/save-external', tradeLimiter, async (req, res) => {
 
 app.get('/api/trade/recent', async (req, res) => {
   try {
-    const { limit = 20 } = req.query;
+    const { limit = 20, marketId } = req.query;
     const limitNum = Math.min(100, parseInt(limit) || 20);
-    const { data, error } = await supabase
+    let query = supabase
       .from('trades')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(limitNum);
+      
+    if (marketId) {
+      query = query.eq('market_id', marketId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       console.error('Error fetching recent trades:', error.message);
@@ -2481,7 +2526,7 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
     } catch (_) {}
     const scanAddresses = [userAddress, agentAddress].filter(Boolean);
 
-    const rows = await getTrades(userId);
+    const rows = await getTrades([userId, `agent_${userId}`]);
 
     const terminalStates = ['COMPLETE', 'FAILED', 'CANCELLED', 'DENIED'];
     const pendingRows = rows.filter(r => !r.state || !terminalStates.includes(r.state.toUpperCase()));
@@ -3361,6 +3406,28 @@ registerAgentPnl(app, {
 });
 
 app.get('/health', (_, res) => res.json({ ok: true }));
+
+// ── Image Proxy ──────────────────────────────────────────────────────────────
+// Bypasses CORS restrictions for CanvasKit in Flutter Web.
+app.get('/api/image-proxy', async (req, res) => {
+  const imageUrl = req.query.url;
+  if (!imageUrl) return res.status(400).json({ error: 'URL required' });
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      return res.status(response.status).send('Failed to fetch image');
+    }
+    const contentType = response.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+    
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to proxy image', details: err.message });
+  }
+});
 
 // ── Dynamic OG share image for a market (SVG) ─────────────────────────────────
 // Rich link previews when a prediction is shared: question + YES/NO odds on the
@@ -4702,7 +4769,7 @@ async function getAgent(userId) {
   const walletId = await getWalletId(`agent_${userId}`);
   if (!walletId) return null;
   const info = await getWalletInfo(walletId);
-  return { walletId, address: info.address, balance: info.usdcBalance };
+  return { walletId, address: info.address, balance: info.usdcBalance, exactBalance: info.exactUsdcBalance };
 }
 
 // In-memory guard so we only register each agent on ERC-8004 once per process.
@@ -5039,7 +5106,7 @@ app.post('/api/agent/start', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
             tokenAddress: USDC,
             blockchain: 'ARC-TESTNET',
             destinationAddress: agentAddress,
-            amount: [need.toFixed(6)],
+            amounts: [need.toFixed(6)],
             fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
           });
           funded = need;
@@ -5128,11 +5195,12 @@ app.post('/api/agent/deposit', authenticateUser, requireVerifiedUser, strictLimi
     if (!userWalletId) return res.status(400).json({ error: 'No user wallet' });
 
     const tx = await circle.createTransaction({
+      idempotencyKey: crypto.randomUUID(),
       walletId: userWalletId,
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: agent.address,
-      amount: [amt.toFixed(6)],
+      amounts: [amt.toFixed(6)],
       fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
     });
     // Wait for settle so the returned balance reflects the deposit.
@@ -5162,22 +5230,36 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
     const userWalletId = await getWalletId(userId);
     if (!userWalletId) return res.status(400).json({ error: 'No user wallet' });
     const userAddress = (await getWalletInfo(userWalletId)).address;
-    const balance = parseFloat(agent.balance) || 0;
-    if (balance < 0.01) return res.json({ withdrawn: 0, balance: 0 });
+
+    // Get the REAL balance from Circle SDK directly (not cached / RPC)
+    const balRes = await circle.getWalletTokenBalance({ id: agent.walletId });
+    const usdcToken = balRes.data.tokenBalances?.find(
+      t => t.token?.address?.toLowerCase() === USDC.toLowerCase() || t.token?.symbol === 'USDC'
+    );
+    const realBalance = parseFloat(usdcToken?.amount ?? '0');
+    console.log('[withdraw] walletId=' + agent.walletId + ' realBalance=' + realBalance + ' addr=' + agent.address + ' -> user=' + userAddress);
+
+    if (realBalance < 0.02) return res.json({ withdrawn: 0, balance: realBalance.toFixed(2) });
+
+    // Withdraw 90% of the balance to leave plenty for gas
+    const withdrawAmt = Math.floor((realBalance * 0.9) * 1_000_000) / 1_000_000;
+    console.log('[withdraw] withdrawAmt=' + withdrawAmt);
 
     const tx = await circle.createTransaction({
       walletId: agent.walletId,
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: userAddress,
-      amount: [balance.toFixed(6)],
+      amounts: [withdrawAmt.toFixed(6)],
       fee: { type: 'level', config: { feeLevel: 'MEDIUM' } },
     });
-    res.json({ withdrawn: balance, txId: tx.data?.id });
+    console.log('[withdraw] tx created:', tx.data?.id);
+    res.json({ withdrawn: withdrawAmt, txId: tx.data?.id });
   } catch (e) {
     console.error('agent withdraw error:', e.message);
     res.status(500).json({ error: e.message });
   }
+
 });
 
 // Chat with the agent. The LLM returns a structured intent; the backend validates
@@ -5634,6 +5716,38 @@ Rules:
 
 // ── Push Notifications & In-App Notifications ─────────────────────────────────
 
+async function pingIndexNow(marketId) {
+  const apiKey = "8d263884d3d242a08882fa883908f00d"; 
+  const domain = "app.pulsmarket.tech";
+
+  const payload = {
+    host: domain,
+    key: apiKey,
+    keyLocation: `https://${domain}/${apiKey}.txt`,
+    urlList: [
+      `https://${domain}/market/${marketId}`
+    ]
+  };
+
+  try {
+    const response = await fetch('https://api.indexnow.org/indexnow', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (response.ok) {
+      console.log(`[IndexNow] 🚀 Успешно отправлен в индекс рынок: ${marketId}`);
+    } else {
+      console.error(`[IndexNow] ❌ Ошибка индексации: ${response.status} ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error(`[IndexNow] ❌ Ошибка сети при отправке:`, error);
+  }
+}
+
 async function createNotification(userId, title, message, type) {
   try {
     const { data, error } = await supabase
@@ -5731,6 +5845,80 @@ app.post('/api/notifications/mark-read', authenticateUser, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// ── User-to-User Messages ────────────────────────────────────────────────────
+
+// GET /api/messages
+app.get('/api/messages', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+
+    const { data: messages, error } = await supabase
+      .from('comments')
+      .select('id, user_id, target_id, body, created_at')
+      .eq('target_type', 'dm')
+      .or(`user_id.eq.${userId},target_id.eq.${userId}`)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const conversations = new Map();
+    for (const msg of (messages || [])) {
+      const partnerId = msg.user_id === userId ? msg.target_id : msg.user_id;
+      if (!conversations.has(partnerId)) {
+        conversations.set(partnerId, msg);
+      }
+    }
+
+    res.json(Array.from(conversations.values()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/messages/:targetUserId
+app.get('/api/messages/:targetUserId', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    const targetUserId = req.params.targetUserId;
+    if (!userId || !targetUserId) return res.status(400).json({ error: 'userId and targetUserId required' });
+
+    const { data: messages, error } = await supabase
+      .from('comments')
+      .select('id, user_id, target_id, body, created_at')
+      .eq('target_type', 'dm')
+      .or(`and(user_id.eq.${userId},target_id.eq.${targetUserId}),and(user_id.eq.${targetUserId},target_id.eq.${userId})`)
+      .order('created_at', { ascending: true })
+      .limit(200);
+
+    if (error) throw error;
+    res.json(messages || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/messages/:targetUserId
+app.post('/api/messages/:targetUserId', authenticateUser, strictLimiter, async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    const targetUserId = req.params.targetUserId;
+    const body = String(req.body.body || '').trim();
+    if (!userId || !targetUserId || !body) return res.status(400).json({ error: 'userId, targetUserId, body required' });
+
+    const { data, error } = await supabase.from('comments').insert({
+      user_id: userId,
+      target_type: 'dm',
+      target_id: targetUserId,
+      body: body
+    }).select('id, user_id, target_id, body, created_at').single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── User-Created Markets ─────────────────────────────────────────────────────
 
@@ -5760,7 +5948,7 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
       tokenAddress: USDC,
       blockchain: 'ARC-TESTNET',
       destinationAddress: adminAccount.address,
-      amount: ['10.000000'],
+      amounts: ['10.000000'],
       fee: { type: 'level', config: { feeLevel: 'HIGH' } },
     });
     
@@ -6152,6 +6340,87 @@ async function checkAndExecuteLimitOrders() {
   }
 }
 
+// ── Support Tickets ─────────────────────────────────────────────────────────
+
+app.get('/api/support/tickets', authenticateUser, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('support_tickets')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('updated_at', { ascending: false });
+    if (error) throw error;
+    res.json({ tickets: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/support/tickets', authenticateUser, async (req, res) => {
+  try {
+    const { subject, body } = req.body;
+    if (!subject || !body) return res.status(400).json({ error: 'Subject and body required' });
+    
+    const { data: ticket, error: tErr } = await supabase
+      .from('support_tickets')
+      .insert({ user_id: req.user.id, subject, status: 'open' })
+      .select().single();
+    if (tErr) throw tErr;
+    
+    const { error: mErr } = await supabase
+      .from('support_messages')
+      .insert({ ticket_id: ticket.id, sender_id: req.user.id, body });
+    if (mErr) throw mErr;
+    
+    res.status(201).json({ ticket });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/support/tickets/:ticketId', authenticateUser, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('support_tickets')
+      .select('*')
+      .eq('id', req.params.ticketId)
+      .eq('user_id', req.user.id)
+      .single();
+    if (error) throw error;
+    res.json({ ticket: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/support/tickets/:ticketId/messages', authenticateUser, async (req, res) => {
+  try {
+    const { body } = req.body;
+    const ticketId = req.params.ticketId;
+    if (!body) return res.status(400).json({ error: 'Body required' });
+    
+    const { data: ticket, error: tErr } = await supabase
+      .from('support_tickets')
+      .select('id')
+      .eq('id', ticketId)
+      .eq('user_id', req.user.id)
+      .single();
+    if (tErr || !ticket) return res.status(403).json({ error: 'Forbidden' });
+    
+    const { data: message, error: mErr } = await supabase
+      .from('support_messages')
+      .insert({ ticket_id: ticketId, sender_id: req.user.id, body })
+      .select().single();
+    if (mErr) throw mErr;
+    
+    await supabase.from('support_tickets').update({ updated_at: new Date().toISOString() }).eq('id', ticketId);
+    
+    res.status(201).json({ message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Run matching engine every 20 seconds
 setInterval(checkAndExecuteLimitOrders, 20 * 1000);
 
@@ -6497,9 +6766,9 @@ async function getAgentStrategy(userId) {
       .from('wallets')
       .select('strategy')
       .eq('user_id', `agent_${userId}`)
-      .single();
-    if (!error && data && data.strategy) {
-      return data.strategy;
+      .limit(1);
+    if (!error && data && data.length > 0 && data[0].strategy) {
+      return data[0].strategy;
     }
   } catch (_) {}
   return agentStrategies.get(userId) ?? 'NONE';
@@ -7183,14 +7452,14 @@ function _todayKey() { return new Date().toISOString().slice(0, 10); }
 // remaining-daily budget. 0 means "can't size a trade now".
 function houseRiskSize(balance) {
   if (houseRisk.dayKey !== _todayKey()) { houseRisk.dayKey = _todayKey(); houseRisk.spentToday = 0; }
-  const remainingDaily = Math.max(0, HOUSE_AGENT_DAILY_CAP - houseRisk.spentToday);
-  if (remainingDaily < 0.1) return 0;
-  // Base 12% of bankroll, scaled up to +50% on a hot streak (capped), down after a loss.
   const streakMult = houseRisk.streak >= 3 ? 1.5 : houseRisk.streak === 2 ? 1.25 : houseRisk.streak <= -1 ? 0.6 : 1.0;
   let stake = (balance - 0.1) * 0.12 * streakMult;
-  stake = Math.min(stake, HOUSE_AGENT_MAX_TRADE, remainingDaily);
+  
+  if (stake < 0.1 && balance >= 0.2) stake = 0.1;
+  
+  stake = Math.min(stake, HOUSE_AGENT_MAX_TRADE);
   stake = Math.floor(stake * 10) / 10; // 0.1 USDC granularity
-  return stake >= 0.1 ? stake : 0;
+  return stake >= 0.1 ? stake : (balance >= 0.2 ? 0.1 : 0);
 }
 
 async function houseAgentDecide(candidates, balance, alpha = null, research = null) {
@@ -7367,6 +7636,7 @@ async function houseAgentTick() {
         streak: decision.streak ?? null,
         txHash: result.txHash,
         contractAddress: decision.contractAddress,
+        slug: decision.slug || null,
         // Agent→creator nanopayment that fed this decision (if any).
         alphaPaid: alpha ? alpha.cost : null,
         alphaCreator: alpha ? alpha.creator : null,
