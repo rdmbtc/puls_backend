@@ -96,6 +96,7 @@ app.use(compression({
 // points/me, signals, comments, support, alpha/:id). Non-200s aren't cached by
 // Cloudflare, and config rules are listed before the broader :id rule.
 const PUBLIC_CACHE_RULES = [
+  [/^\/sitemap\.xml$/, 60],
   [/^\/api\/(blog|swap|tips|comments|support|referrals)\/config\/?$/, 300],
   [/^\/api\/x402\/info\/?$/, 300],
   [/^\/api\/og\/market\//, 300],
@@ -304,6 +305,28 @@ const supabase = createClient(
   process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
   process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : '' // use service_role key (server-side only)
 );
+
+async function pingIndexNow(urls) {
+  if (!urls || urls.length === 0) return;
+  const INDEXNOW_KEY = '51e360e20e504c2ea2d600490b41c099';
+  const INDEXNOW_HOST = 'app.pulsmarket.tech';
+  try {
+    const res = await fetch('https://api.indexnow.org/indexnow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: INDEXNOW_HOST,
+        key: INDEXNOW_KEY,
+        keyLocation: `https://${INDEXNOW_HOST}/${INDEXNOW_KEY}.txt`,
+        urlList: urls
+      })
+    });
+    console.log(`[IndexNow] Pinged ${urls.length} URL(s), response: ${res.status}`);
+  } catch (err) {
+    console.error(`[IndexNow] Ping error: ${err.message}`);
+  }
+}
+
 
 const USDC = '0x3600000000000000000000000000000000000000';
 let walletSetId = (process.env.WALLET_SET_ID || '').trim();
@@ -1497,6 +1520,46 @@ async function getMarketActivityAgg() {
   _activityAgg = { at: Date.now(), tradeAgg, commentAgg };
   return _activityAgg;
 }
+
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    const { data: markets, error } = await supabase
+      .from('markets')
+      .select('slug, created_at')
+      .eq('status', 'ACTIVE')
+      .order('created_at', { ascending: false })
+      .limit(1000);
+
+    if (error) throw error;
+
+    const urls = (markets || []).map(m => {
+      const dateStr = m.created_at ? new Date(m.created_at).toISOString() : new Date().toISOString();
+      return `  <url>
+    <loc>https://app.pulsmarket.tech/m/${m.slug}</loc>
+    <lastmod>${dateStr}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.8</priority>
+  </url>`;
+    }).join('\n');
+
+    const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://app.pulsmarket.tech/</loc>
+    <lastmod>${new Date().toISOString()}</lastmod>
+    <changefreq>always</changefreq>
+    <priority>1.0</priority>
+  </url>
+${urls}
+</urlset>`;
+
+    res.header('Content-Type', 'application/xml');
+    res.send(sitemap);
+  } catch (err) {
+    console.error('[Sitemap] generation failed:', err.message);
+    res.status(500).end();
+  }
+});
 
 app.get('/api/markets', async (req, res) => {
   try {
@@ -5752,6 +5815,8 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
       `Your custom market "${question}" has been deployed on Arc Testnet!`,
       'system'
     ).catch(console.error);
+
+    pingIndexNow([`https://app.pulsmarket.tech/m/${slug}`]).catch(console.error);
 
     res.json({ slug, contractAddress });
   } catch (e) {
