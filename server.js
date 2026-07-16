@@ -5656,7 +5656,7 @@ Rules:
 
 async function pingIndexNow(marketId) {
   const apiKey = "8d263884d3d242a08882fa883908f00d"; 
-  const domain = "pulsmarket.tech";
+  const domain = "app.pulsmarket.tech";
 
   const payload = {
     host: domain,
