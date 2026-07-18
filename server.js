@@ -35,6 +35,7 @@ import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_ch
 import { eventBus, EVENTS } from './lib/events.js';
 import { cache } from './lib/cache.js';
 import { initSocketIo } from './lib/socketio.js';
+import { initRawWs } from './lib/socketws.js';
 
 // Prevent unhandled promise rejections from crashing the server
 process.on('unhandledRejection', (reason, promise) => {
@@ -6547,10 +6548,15 @@ const server = app.listen(PORT, async () => {
 // it up — no manual `client.send(...)` loop needed.
 const io = initSocketIo(server);
 
+// ── Raw `ws` gateway (backward-compat for existing feed clients) ───────────
+// Existing Flutter clients (feed_screen.dart, live_on_arc.dart) speak plain
+// WS, not Socket.IO. Keep them working; they consume TRADE_COMPLETE frames.
+const rawWs = initRawWs(server);
+
 function broadcastTrade(trade) {
   // Fan out to the internal event bus → cache + agents + Socket.IO gateway
-  // all react. broadcastTrade is only called for COMPLETE trades, so the
-  // bus event is TRADE_COMPLETE.
+  // + raw `ws` gateway all react. broadcastTrade is only called for COMPLETE
+  // trades, so the bus event is TRADE_COMPLETE.
   eventBus.safeEmit(EVENTS.TRADE_COMPLETE, trade);
   console.log(`[broadcast] trade event: ${trade.id}`);
 }
