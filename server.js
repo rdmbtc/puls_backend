@@ -34,6 +34,7 @@ import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
 import { eventBus, EVENTS } from './lib/events.js';
 import { cache } from './lib/cache.js';
+import { initSocketIo } from './lib/socketio.js';
 
 // Prevent unhandled promise rejections from crashing the server
 process.on('unhandledRejection', (reason, promise) => {
@@ -6539,40 +6540,19 @@ const server = app.listen(PORT, async () => {
     .catch(console.error);
 });
 
-// ── WebSocket Server for Live Betting Feed ──
-import { WebSocketServer } from 'ws';
-const wss = new WebSocketServer({ server });
-const wsClients = new Set();
-
-wss.on('connection', (ws) => {
-  wsClients.add(ws);
-  console.log(`[WebSocket] Client connected. Active clients: ${wsClients.size}`);
-  ws.on('close', () => {
-    wsClients.delete(ws);
-    console.log(`[WebSocket] Client disconnected. Active clients: ${wsClients.size}`);
-  });
-  ws.on('error', (err) => {
-    wsClients.delete(ws);
-    console.error('[WebSocket] Client error:', err.message);
-  });
-});
+// ── Socket.IO gateway (replaces raw `ws` broadcast) ─────────────────────────
+// One gateway subscribes to the internal eventBus (lib/events.js) and
+// broadcasts every canonical event to connected Flutter / web clients.
+// `broadcastTrade` below emits TRADE_COMPLETE on the bus; the gateway picks
+// it up — no manual `client.send(...)` loop needed.
+const io = initSocketIo(server);
 
 function broadcastTrade(trade) {
-  // Fan out to (a) the internal event bus → cache + agents react synchronously
-  // and (b) the live WebSocket feed for connected Flutter clients. broadcastTrade
-  // is only called for COMPLETE trades, so the bus event is TRADE_COMPLETE.
+  // Fan out to the internal event bus → cache + agents + Socket.IO gateway
+  // all react. broadcastTrade is only called for COMPLETE trades, so the
+  // bus event is TRADE_COMPLETE.
   eventBus.safeEmit(EVENTS.TRADE_COMPLETE, trade);
-  const payload = JSON.stringify(trade);
-  console.log(`[WebSocket] Broadcasting trade event: ${trade.id}`);
-  for (const client of wsClients) {
-    if (client.readyState === 1) { // OPEN
-      try {
-        client.send(payload);
-      } catch (err) {
-        console.error('[WebSocket] Broadcast failed:', err.message);
-      }
-    }
-  }
+  console.log(`[broadcast] trade event: ${trade.id}`);
 }
 
 // ── AI Finance Director (x402-paid, portfolio-aware) ─────────────────────────
