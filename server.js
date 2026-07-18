@@ -32,6 +32,8 @@ import { registerLepton } from './lib/lepton.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
+import { eventBus, EVENTS } from './lib/events.js';
+import { cache } from './lib/cache.js';
 
 // Prevent unhandled promise rejections from crashing the server
 process.on('unhandledRejection', (reason, promise) => {
@@ -902,6 +904,15 @@ async function _executeMarketDeployment(slug, deadlineSeconds) {
   deployedMarketsCache.set(slug, entry);
   contractToSlugCache.set(deployedAddress.toLowerCase(), slug);
 
+  // Fan out so the new cache slice + scheduled-resolution timer pick it up.
+  eventBus.safeEmit(EVENTS.MARKET_ACTIVATED, {
+    slug,
+    contract_address: deployedAddress,
+    deadline: deadlineSeconds,
+    resolved: false,
+    outcome: null,
+  });
+
   return deployedAddress;
 }
 
@@ -948,6 +959,12 @@ async function getOrDeployMarket(slug, deadlineSeconds) {
 // ── Supabase helpers ──────────────────────────────────────────────────────────
 
 async function getWalletId(userId) {
+  // Cache-first: the wallets slice is hydrated at boot and kept in sync by
+  // WALLET_CREATED events. Falls back to a one-time Supabase read on a miss
+  // (e.g., a wallet created before this process started whose row wasn't in
+  // the boot snapshot — shouldn't happen, but stays correct if it does).
+  const cached = cache.walletByUser(userId);
+  if (cached && cached.wallet_id) return cached.wallet_id;
   const { data } = await supabase
     .from('wallets')
     .select('wallet_id')
@@ -958,6 +975,14 @@ async function getWalletId(userId) {
 
 async function saveWallet(userId, walletId) {
   await supabase.from('wallets').upsert({ user_id: userId, wallet_id: walletId });
+  // Fan out so the in-memory cache indexes the new wallet without a re-query.
+  // Address is fetched lazily later (Circle SDK); cache indexes by user_id now.
+  eventBus.safeEmit(EVENTS.WALLET_CREATED, {
+    user_id: userId,
+    wallet_id: walletId,
+    last_balance: '0',
+    strategy: null,
+  });
 }
 
 async function isApproved(walletId, contractAddress) {
@@ -990,8 +1015,9 @@ async function isApproved(walletId, contractAddress) {
 
 async function saveTrade(userId, trade) {
   const { data } = await supabase.from('trades').insert({ user_id: userId, ...trade }).select().single();
-  if (data && data.state === 'COMPLETE') {
-    broadcastTrade(data);
+  if (data) {
+    eventBus.safeEmit(EVENTS.TRADE_CREATED, data);
+    if (data.state === 'COMPLETE') broadcastTrade(data);
   }
 }
 
@@ -1080,9 +1106,10 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
         .single();
         
       if (newTrade) {
+        eventBus.safeEmit(EVENTS.TRADE_CREATED, newTrade);
         broadcastTrade(newTrade);
       }
-      
+
       console.log(`[QuickNode Webhook] Inserted new completed trade for tx ${txHash}`);
       createNotification(
         userId,
@@ -3729,6 +3756,7 @@ async function handleQuickNodeLog(log) {
           cached.resolved = true;
           cached.outcome = outcome;
         }
+        eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug, outcome });
         console.log(`[QuickNode Webhook] Successfully updated resolved state in DB & cache for ${slug}`);
         
         // Notify traders who participated in this market
@@ -3903,6 +3931,7 @@ async function archiveMarket(slug, reason) {
       contractToSlugCache.delete((entry.contractAddress || '').toLowerCase());
       deployedMarketsCache.delete(slug);
     }
+    eventBus.safeEmit(EVENTS.MARKET_ARCHIVED, { slug });
     console.log(`[Archive] ${slug} archived (${reason})`);
     return true;
   } catch (e) {
@@ -4010,6 +4039,7 @@ async function checkAndResolveMarkets() {
               .eq('slug', market.slug);
             const entry = deployedMarketsCache.get(market.slug);
             if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
+            eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
             console.log(`✅ [UMA] Market ${market.slug} settled via Optimistic Oracle: ${outcomeOnChain ? 'YES' : 'NO'}`);
           }
           continue;
@@ -4055,6 +4085,7 @@ async function checkAndResolveMarkets() {
 
       market.resolved = true;
       market.outcome = outcome;
+      eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome });
       console.log(`✅ Deployed market ${market.slug} resolved successfully.`);
     } catch (e) {
       console.error(`Failed to resolve market ${market.slug}:`, e.message);
@@ -4062,8 +4093,36 @@ async function checkAndResolveMarkets() {
   }
 }
 
-// Run resolution check every 5 minutes
-setInterval(checkAndResolveMarkets, 5 * 60 * 1000);
+// Event-driven market resolution: instead of polling every 5 minutes, find
+// the unresolved market with the nearest deadline and arm a single setTimeout
+// for it. When it fires, run the resolver (which settles due markets) and
+// re-arm for the next one. Zero polling, zero continuous Supabase egress.
+let _resolutionTimer = null;
+function scheduleNextMarketResolution() {
+  if (_resolutionTimer) { clearTimeout(_resolutionTimer); _resolutionTimer = null; }
+  const now = Math.floor(Date.now() / 1000);
+  const unresolved = cache.unresolvedMarkets(); // in-memory, no DB read
+  if (unresolved.length === 0) return;
+  // Nearest future (or already-due) deadline.
+  let nearest = Infinity;
+  for (const m of unresolved) {
+    const dl = Number(m.deadline);
+    if (Number.isFinite(dl) && dl < nearest) nearest = dl;
+  }
+  if (!Number.isFinite(nearest)) return;
+  const delayMs = Math.max(0, (nearest - now) * 1000);
+  // Cap at 1h so a far-future deadline doesn't hold a stale timer if markets
+  // are added/activated in the meantime (their MARKET_ACTIVATED event reschedules).
+  const cappedDelay = Math.min(delayMs, 60 * 60 * 1000);
+  _resolutionTimer = setTimeout(() => {
+    _resolutionTimer = null;
+    checkAndResolveMarkets().catch(console.error).finally(() => scheduleNextMarketResolution());
+  }, cappedDelay);
+  _resolutionTimer.unref?.();
+}
+// When a market is created/activated, the nearest-deadline may have changed.
+eventBus.on(EVENTS.MARKET_CREATED, () => scheduleNextMarketResolution());
+eventBus.on(EVENTS.MARKET_ACTIVATED, () => scheduleNextMarketResolution());
 
 async function warmupTopMarkets() {
   console.log('Starting eager market warmup for top active markets...');
@@ -4427,8 +4486,18 @@ async function updateLeaderboard() {
   }
 }
 
-// Run leaderboard update every 10 minutes
-setInterval(updateLeaderboard, 10 * 60 * 1000);
+// Event-driven leaderboard refresh: invalidate the cache + rebuild on trade
+// activity instead of a 10-minute poll. Debounced so a burst of trades only
+// triggers one rebuild.
+let _leaderboardRebuildTimer = null;
+function scheduleLeaderboardRebuild() {
+  if (_leaderboardRebuildTimer) return; // already scheduled
+  _leaderboardRebuildTimer = setTimeout(() => {
+    _leaderboardRebuildTimer = null;
+    updateLeaderboard().catch((e) => console.error('leaderboard rebuild:', e.message));
+  }, 10_000).unref?.();
+}
+eventBus.on(EVENTS.TRADE_COMPLETE, () => scheduleLeaderboardRebuild());
 
 // In-memory leaderboard cache (60s TTL) to avoid Supabase rate limits
 const leaderboardCache = new Map(); // key: "sort:limit" → { data, ts }
@@ -5728,11 +5797,21 @@ async function createNotification(userId, title, message, type) {
         type,
         read: false
       });
-      
+
     if (error) {
       console.error('[Notification Error] Failed to save in-app notification:', error.message);
     } else {
       console.log(`[Notification] Saved notification for user ${userId}: "${title}"`);
+      // Fan out on the bus so the in-memory ring buffer + future WS/FCM push
+      // can react. Supabase insert above is the durable source of truth.
+      eventBus.safeEmit(EVENTS.NOTIFICATION_CREATED, {
+        user_id: userId,
+        title,
+        message,
+        type,
+        read: false,
+        created_at: new Date().toISOString(),
+      });
     }
 
     // Try to retrieve user's FCM token for push delivery
@@ -6023,7 +6102,9 @@ app.post('/api/trade/limit-order', authenticateUser, requireVerifiedUser, tradeL
       .single();
       
     if (error) throw error;
-    
+
+    eventBus.safeEmit(EVENTS.ORDER_LIMIT_PLACED, data);
+
     createNotification(
       userId,
       'Limit Order Placed 🎯',
@@ -6073,7 +6154,9 @@ app.post('/api/trade/limit-order/cancel', authenticateUser, requireVerifiedUser,
       .single();
       
     if (error) throw error;
-    
+
+    eventBus.safeEmit(EVENTS.ORDER_LIMIT_CANCELLED, { id: orderId });
+
     createNotification(
       userId,
       'Order Cancelled 🚫',
@@ -6087,37 +6170,26 @@ app.post('/api/trade/limit-order/cancel', authenticateUser, requireVerifiedUser,
   }
 });
 
-// The Limit Orders Execution Engine (monitors and triggers trades on-chain)
+// The Limit Orders Execution Engine. Triggered by trade:complete events (a
+// trade moves the pool price → re-evaluate pending orders for that market)
+// and once at boot via sweepPendingLimitOrders(). No polling.
 let _limitOrdersTableMissing = false;
-async function checkAndExecuteLimitOrders() {
-  if (_limitOrdersTableMissing) return; // Skip silently if table doesn't exist
-  console.log('Running limit orders matching check...');
-  try {
-    const { data: pendingOrders, error } = await supabase
-      .from('limit_orders')
-      .select('*')
-      .eq('status', 'PENDING');
-      
-    if (error) {
-      if (error.message?.includes('schema cache')) {
-        console.warn('Limit orders table not found in schema — disabling cron until restart.');
-        _limitOrdersTableMissing = true;
-      } else {
-        console.error('Failed to load pending limit orders:', error.message);
-      }
-      return;
-    }
-    
-    if (!pendingOrders || pendingOrders.length === 0) {
-      console.log('No pending limit orders to check.');
-      return;
-    }
-    
-    console.log(`Checking ${pendingOrders.length} pending limit orders...`);
-    
-    for (const order of pendingOrders) {
-      try {
-        const { id: orderId, user_id: userId, market_id: marketId, slug, side, type, usdc_amount: amount, shares, target_price: targetPrice } = order;
+const _limitOrderChecksInFlight = new Set(); // marketId dedupe while a check runs
+
+async function checkAndExecuteLimitOrders(filterMarketId) {
+  if (_limitOrdersTableMissing) return;
+  // Read from the in-memory cache (hydrated at boot, kept in sync by bus events
+  // on ORDER_LIMIT_PLACED/FILLED/CANCELLED). Zero Supabase egress here.
+  let pendingOrders = cache.pendingLimitOrders();
+  if (filterMarketId) pendingOrders = pendingOrders.filter((o) => o.market_id === filterMarketId);
+
+  if (!pendingOrders || pendingOrders.length === 0) return;
+
+  console.log(`Checking ${pendingOrders.length} pending limit orders${filterMarketId ? ` for market ${filterMarketId}` : ''}...`);
+
+  for (const order of pendingOrders) {
+    try {
+      const { id: orderId, user_id: userId, market_id: marketId, slug, side, type, usdc_amount: amount, shares, target_price: targetPrice } = order;
         
         let currentPrice = 0.5;
         let poolYes = 0;
@@ -6176,12 +6248,16 @@ async function checkAndExecuteLimitOrders() {
           .update({ status: 'EXECUTING' })
           .eq('id', orderId)
           .eq('status', 'PENDING');
-          
-        if (lockErr) continue; 
-        
+
+        if (lockErr) continue;
+        // Evict from cache immediately so a concurrent trade:complete trigger
+        // for the same market can't double-execute this order.
+        cache.limitOrders.delete(orderId);
+
         const walletId = await getWalletId(userId);
         if (!walletId) {
           await supabase.from('limit_orders').update({ status: 'FAILED' }).eq('id', orderId);
+          eventBus.safeEmit(EVENTS.ORDER_LIMIT_CANCELLED, { id: orderId });
           continue;
         }
         
@@ -6258,7 +6334,8 @@ async function checkAndExecuteLimitOrders() {
               tx_hash: txHash
             })
             .eq('id', orderId);
-            
+          eventBus.safeEmit(EVENTS.ORDER_LIMIT_FILLED, { id: orderId, txHash });
+
           const { data: updatedTrade } = await supabase
             .from('trades')
             .update({
@@ -6268,11 +6345,11 @@ async function checkAndExecuteLimitOrders() {
             .eq('tx_id', circleId)
             .select()
             .single();
-          
+
           if (updatedTrade) {
             broadcastTrade(updatedTrade);
           }
-          
+
           createNotification(
             userId,
             'Limit Order Triggered! ⚡',
@@ -6284,14 +6361,15 @@ async function checkAndExecuteLimitOrders() {
             .from('limit_orders')
             .update({ status: 'FAILED' })
             .eq('id', orderId);
-            
+          eventBus.safeEmit(EVENTS.ORDER_LIMIT_CANCELLED, { id: orderId });
+
           await supabase
             .from('trades')
             .update({
               state: 'FAILED'
             })
             .eq('tx_id', circleId);
-            
+
           createNotification(
             userId,
             'Limit Order Failed ❌',
@@ -6301,13 +6379,45 @@ async function checkAndExecuteLimitOrders() {
         }
       } catch (err) {
         console.error(`Error processing limit order ${order.id}:`, err.message);
+        // Revert to PENDING in Supabase + re-add to cache so it can be retried
+        // on the next price-moving event.
         await supabase.from('limit_orders').update({ status: 'PENDING' }).eq('id', order.id);
+        cache.limitOrders.set(order.id, { ...order, status: 'PENDING' });
       }
     }
+}
+
+// One-time boot sweep of pending limit orders (catches anything that came due
+// while the server was down). After this, trade:complete events drive checks.
+async function sweepPendingLimitOrders() {
+  try {
+    await checkAndExecuteLimitOrders();
   } catch (e) {
-    console.error('checkAndExecuteLimitOrders error:', e.message);
+    console.error('sweepPendingLimitOrders error:', e.message);
   }
 }
+
+// Debounced per-market limit-order evaluation. When a trade completes (which
+// moves the on-chain price), re-check pending orders for that market. If many
+// trades land in quick succession we collapse them into a single check.
+function scheduleLimitOrderCheck(marketId) {
+  if (!marketId || _limitOrderChecksInFlight.has(marketId)) return;
+  _limitOrderChecksInFlight.add(marketId);
+  setTimeout(() => {
+    _limitOrderChecksInFlight.delete(marketId);
+    checkAndExecuteLimitOrders(marketId).catch((e) =>
+      console.error(`limit-order check failed for ${marketId}:`, e.message)
+    );
+  }, 2000).unref?.();
+}
+
+// Drive limit-order checks from trade events instead of a 20s poll.
+eventBus.on(EVENTS.TRADE_COMPLETE, (t) => {
+  if (t && t.market_id) scheduleLimitOrderCheck(t.market_id);
+});
+eventBus.on(EVENTS.TRADE_CREATED, (t) => {
+  if (t && t.market_id) scheduleLimitOrderCheck(t.market_id);
+});
 
 // ── Support Tickets ─────────────────────────────────────────────────────────
 
@@ -6390,8 +6500,8 @@ app.post('/api/support/tickets/:ticketId/messages', authenticateUser, async (req
   }
 });
 
-// Run matching engine every 20 seconds
-setInterval(checkAndExecuteLimitOrders, 20 * 1000);
+// Limit-order matching is now event-driven (see scheduleLimitOrderCheck above);
+// the 20s poll has been removed.
 
 app.get('/robots.txt', (req, res) => {
   res.type('text/plain');
@@ -6399,16 +6509,29 @@ app.get('/robots.txt', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// Hydrate the in-memory cache from Supabase BEFORE accepting traffic, then
+// subscribe to the event bus so the cache stays in sync without polling.
+// This is a one-time egress at boot; afterwards all reads go through the cache
+// and writes fan out via eventBus. (ESM top-level await.)
+await cache.hydrate(supabase);
+cache.subscribe();
+
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
+  console.log(`[cache] ${JSON.stringify(cache.stats())}`);
   console.log(`[UMA] Optimistic Oracle resolution: ${UMA_RESOLUTION && UMA_ADAPTER_ADDRESS ? `ENABLED (adapter ${UMA_ADAPTER_ADDRESS}, oracle ${UMA_OOV2_ADDRESS})` : 'disabled (legacy direct resolve)'}`);
   console.log(`[Wallets] account type: ${WALLET_ACCOUNT_TYPE}; Circle webhook signature enforce: ${CIRCLE_WEBHOOK_ENFORCE}`);
   await loadDeployedMarkets();
+  // One-time sweep of time-due work (replaces the old polling crons). These
+  // catch anything that came due while the server was down; from here on the
+  // event bus + per-market deadline timers drive everything.
   checkAndResolveMarkets().catch(console.error);
+  scheduleNextMarketResolution();
+  sweepPendingLimitOrders().catch(console.error);
   warmupTopMarkets().catch(console.error);
   // Treasury low-balance monitor (alerts via ALERT_WEBHOOK_URL if configured).
   checkTreasuryBalance().catch(console.error);
-  setInterval(() => checkTreasuryBalance().catch(console.error), 5 * 60 * 1000);
   // Leaderboard needs the wallet mapping for on-chain position reads
   loadWalletAddressMapping()
     .catch(console.error)
@@ -6435,6 +6558,10 @@ wss.on('connection', (ws) => {
 });
 
 function broadcastTrade(trade) {
+  // Fan out to (a) the internal event bus → cache + agents react synchronously
+  // and (b) the live WebSocket feed for connected Flutter clients. broadcastTrade
+  // is only called for COMPLETE trades, so the bus event is TRADE_COMPLETE.
+  eventBus.safeEmit(EVENTS.TRADE_COMPLETE, trade);
   const payload = JSON.stringify(trade);
   console.log(`[WebSocket] Broadcasting trade event: ${trade.id}`);
   for (const client of wsClients) {
@@ -6712,7 +6839,23 @@ async function reconcileDirectorPlans() {
     }
   } catch (e) { console.error('[director] reconcile error:', e.message); }
 }
-setInterval(reconcileDirectorPlans, 11 * 60 * 1000);
+// Event-driven director plan reconciliation: a basket settles only when ALL its
+// picks' markets have resolved, so the natural trigger is MARKET_RESOLVED. A
+// boot-time sweep catches anything that resolved while the server was down.
+// Debounced so a cluster of market resolutions fires one reconcile pass.
+let _directorReconcileTimer = null;
+function scheduleDirectorReconcile() {
+  if (_directorReconcileTimer) return;
+  _directorReconcileTimer = setTimeout(() => {
+    _directorReconcileTimer = null;
+    reconcileDirectorPlans().catch((e) => console.error('[director] reconcile:', e.message));
+  }, 5_000).unref?.();
+}
+eventBus.on(EVENTS.MARKET_RESOLVED, () => scheduleDirectorReconcile());
+// Best-effort boot sweep (only if the guarantee is enabled).
+if (DIRECTOR_GUARANTEE_ENABLED) {
+  setTimeout(() => reconcileDirectorPlans().catch(() => {}), 60_000).unref?.();
+}
 
 // Director track record (clients won vs refunded) — social proof for the paid agent.
 app.get('/api/agent/director/record', async (_req, res) => {
@@ -7870,7 +8013,15 @@ if (SAGE_AGENT) {
 
 if (HOUSE_AGENT) {
   setTimeout(houseAgentTick, 45 * 1000); // first cycle shortly after boot
-  setInterval(houseAgentTick, 5 * 60 * 1000); // cooldown enforces the real cadence
+  // Subsequent cycles are event-driven: the house agent reacts to new market
+  // activity (trades) and freshly activated markets instead of polling. The
+  // cooldown inside houseAgentTick still bounds the real cadence.
+  eventBus.on(EVENTS.TRADE_COMPLETE, () => {
+    setImmediate(() => houseAgentTick().catch((e) => console.error('[house] tick:', e.message)));
+  });
+  eventBus.on(EVENTS.MARKET_ACTIVATED, () => {
+    setImmediate(() => houseAgentTick().catch((e) => console.error('[house] tick:', e.message)));
+  });
 }
 
 // ── Agent Swarm: a colony of autonomous AI actors that live in Pulsmarket ─────
@@ -7901,5 +8052,16 @@ if (typeof swarm.start === 'function') swarm.start();
 // each session to the agent_decision feed. Gated by STREAM_AGENT_ENABLED.
 registerStreamingAgent({ streamsApi, supabase, getWalletId, getWalletInfo, llmComplete, parseLlmJson, roster: swarm.roster });
 
-// Run strategies check every 60 seconds
-setInterval(runAgentStrategies, 60 * 1000);
+// Agent strategies (arbitrage/DCA) now run on trade + market activity events
+// instead of a 60s poll. Arbitrage reacts to price moves; DCA piggybacks on the
+// same wake-ups. runAgentStrategies itself is idempotent + internally gated.
+eventBus.on(EVENTS.TRADE_COMPLETE, () => {
+  setImmediate(() => {
+    try { runAgentStrategies(); } catch (e) { console.error('runAgentStrategies:', e.message); }
+  });
+});
+eventBus.on(EVENTS.MARKET_ACTIVATED, () => {
+  setImmediate(() => {
+    try { runAgentStrategies(); } catch (e) { console.error('runAgentStrategies:', e.message); }
+  });
+});
