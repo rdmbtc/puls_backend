@@ -43,6 +43,7 @@ import { cache } from './lib/cache.js';
 import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
 import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
+import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
 
 // Prevent unhandled promise rejections from crashing the server.
 // Report to Sentry (if configured) so we get paged, not just a log line.
@@ -2995,15 +2996,22 @@ app.get('/api/stats', async (req, res) => {
       if (page.length < 1000) break;
     }
     // Sum of nanopayment volume (x402 receipts are few — usually a single page).
+    // Also sum protocol revenue (take-rate from raw.treasuryFeeUsdc).
     let nanoVolumeUsdc = 0;
+    let protocolRevenueUsdc = 0;
     const payCount = payCountRes.count ?? 0;
     for (let from = 0; from < payCount; from += 1000) {
       const { data: page } = await supabase
         .from('x402_payments')
-        .select('amount_usdc')
+        .select('amount_usdc, raw')
         .range(from, from + 999);
       if (!page || page.length === 0) break;
-      nanoVolumeUsdc += page.reduce((acc, r) => acc + (parseFloat(r.amount_usdc) || 0), 0);
+      for (const r of page) {
+        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0;
+        // Protocol revenue: take-rate fees stored in raw.treasuryFeeUsdc.
+        const raw = typeof r.raw === 'string' ? JSON.parse(r.raw || '{}') : (r.raw || {});
+        protocolRevenueUsdc += Number(raw.treasuryFeeUsdc || 0);
+      }
       if (page.length < 1000) break;
     }
     const r2 = (n) => Math.round(n * 100) / 100;
@@ -3025,6 +3033,8 @@ app.get('/api/stats', async (req, res) => {
       seedTrades,
       seedVolumeUsdc: r2(seedVolumeUsdc),
       nanopayments: { count: payCount, volumeUsdc: Math.round(nanoVolumeUsdc * 1e6) / 1e6 },
+      protocolRevenueUsdc: Math.round(protocolRevenueUsdc * 1e6) / 1e6,
+      takeRateBps: parseInt(process.env.PLATFORM_TAKE_RATE_BPS || '500', 10),
       updatedAt: new Date().toISOString(),
     };
     statsCache = { data, ts: Date.now() };
@@ -3209,6 +3219,10 @@ const copyTrade = registerCopyTrade(app, {
   requireVerifiedUser,
   strictLimiter,
   clampPrice,
+  treasuryAddress: adminAccount?.address,
+  splitTakeRate,
+  annotatePayment,
+  usdcTransferWithTakeRate,
 });
 
 // ── Alpha paid-analysis (T1 creator layer) ───────────────────────────────────
@@ -3224,6 +3238,10 @@ registerAlpha(app, {
   authenticateUser,
   requireVerifiedUser,
   strictLimiter,
+  treasuryAddress: adminAccount?.address,
+  splitTakeRate,
+  annotatePayment,
+  usdcTransferWithTakeRate,
 });
 
 // ── One-tap tips (T1 creator layer) ──────────────────────────────────────────
@@ -3240,6 +3258,10 @@ registerTips(app, {
   requireVerifiedUser,
   strictLimiter,
   awardPoints,
+  treasuryAddress: adminAccount?.address,
+  splitTakeRate,
+  annotatePayment,
+  usdcTransferWithTakeRate,
 });
 
 // ── Puls Streams (pay-per-second USDC streaming on Arc) ─────────────────────
@@ -3324,6 +3346,10 @@ registerCreatorSignals(app, {
   keccak256,
   toHex,
   awardPoints,
+  treasuryAddress: adminAccount?.address,
+  splitTakeRate,
+  annotatePayment,
+  usdcTransferWithTakeRate,
 });
 
 // ── Agent skin-in-the-game (AgentBond) — gated reconciler + read endpoint ─────
