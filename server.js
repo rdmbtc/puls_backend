@@ -6566,10 +6566,15 @@ const server = app.listen(PORT, async () => {
   // One-time sweep of time-due work (replaces the old polling crons). These
   // catch anything that came due while the server was down; from here on the
   // event bus + per-market deadline timers drive everything.
-  checkAndResolveMarkets().catch(console.error);
-  scheduleNextMarketResolution();
-  sweepPendingLimitOrders().catch(console.error);
-  warmupTopMarkets().catch(console.error);
+  // DEFERRED by 10s so the HTTP server is fully ready to accept traffic before
+  // heavy on-chain work begins (market warmup deploys, UMA settlement, etc.
+  // block the event loop and caused 503 crashes on a 512MB Heroku dyno).
+  setTimeout(() => {
+    checkAndResolveMarkets().catch(console.error);
+    scheduleNextMarketResolution();
+    sweepPendingLimitOrders().catch(console.error);
+    warmupTopMarkets().catch(console.error);
+  }, 10_000).unref?.();
   // Treasury low-balance monitor (alerts via ALERT_WEBHOOK_URL if configured).
   checkTreasuryBalance().catch(console.error);
   // Leaderboard needs the wallet mapping for on-chain position reads
