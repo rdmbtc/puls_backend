@@ -42,6 +42,7 @@ import { eventBus, EVENTS } from './lib/events.js';
 import { cache } from './lib/cache.js';
 import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
+import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
 
 // Prevent unhandled promise rejections from crashing the server.
 // Report to Sentry (if configured) so we get paged, not just a log line.
@@ -1738,18 +1739,15 @@ app.get('/api/markets', async (req, res) => {
       }
     }
 
-    const pmUrl = `https://gamma-api.polymarket.com/markets?limit=${limit}&active=true&closed=false&order=volume&ascending=false&offset=${offset}`;
-    let pmRes = null;
-    try { pmRes = await fetch(pmUrl, { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(8000) }); }
-    catch (e) { console.warn('[markets] Polymarket fetch error/timeout:', e.message); }
-    
     let list = [];
-    if (pmRes && pmRes.ok) {
-      try { list = await pmRes.json(); if (Array.isArray(list) && list.length) _pmLastGood = { at: Date.now(), data: list }; }
-      catch (e) { console.warn('[markets] Polymarket parse failed:', e.message); }
+    try {
+      list = await fetchGamma(`/markets?limit=${limit}&active=true&closed=false&order=volume&ascending=false&offset=${offset}`);
+      if (Array.isArray(list) && list.length) _pmLastGood = { at: Date.now(), data: list };
+    } catch (e) {
+      console.warn('[markets] Polymarket fetch error:', e.message);
     }
-    // Upstream down/slow/empty → serve the last successful feed so judges never
-    // see an empty/broken markets page (graceful degradation, not a 500).
+    // Upstream down/slow/empty → fetchGamma already served stale if available,
+    // but keep the existing _pmLastGood fallback for this high-traffic route.
     if ((!Array.isArray(list) || !list.length) && _pmLastGood && Array.isArray(_pmLastGood.data)) {
       console.warn('[markets] serving last-good Polymarket cache (' + _pmLastGood.data.length + ' markets, age ' + Math.round((Date.now() - _pmLastGood.at) / 1000) + 's)');
       list = _pmLastGood.data;
@@ -1882,20 +1880,14 @@ app.post('/api/market/activate', activateMarketLimiter, async (req, res) => {
 
     // Verify the slug exists and is active on Polymarket
     try {
-      const pmUrl = `https://gamma-api.polymarket.com/markets?slug=${slug}`;
-      const pmRes = await fetch(pmUrl, { headers: { 'Accept': 'application/json' } });
-      if (!pmRes.ok) {
-        console.warn(`[Activate Warning] Polymarket status ${pmRes.status} check failed, skipping verify.`);
-      } else {
-        const data = await pmRes.json();
-        if (!data || data.length === 0) {
-          return res.status(400).json({ error: 'Invalid market slug: Not found on Polymarket' });
-        }
+      const data = await fetchGamma(`/markets?slug=${slug}`);
+      if (!data || data.length === 0) {
+        return res.status(400).json({ error: 'Invalid market slug: Not found on Polymarket' });
+      }
         const pmMarket = data[0];
         if (pmMarket.closed || pmMarket.resolved) {
           return res.status(400).json({ error: 'Invalid market slug: Market is closed or resolved' });
         }
-      }
     } catch (err) {
       console.warn(`[Activate Warning] Polymarket verification failed: ${err.message}. Proceeding anyway.`);
     }
@@ -2806,10 +2798,8 @@ async function generateMarketInsight(slug) {
   // Gather market context (Polymarket first, then our own DB for custom markets)
   const ctx = { question: null, description: '', yesPrice: null, endDate: null, volume: null, change24h: null };
   try {
-    const r = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}`);
-    if (r.ok) {
-      const arr = await r.json();
-      const m = Array.isArray(arr) ? arr[0] : null;
+    const arr = await fetchGamma(`/markets?slug=${encodeURIComponent(slug)}`);
+    const m = Array.isArray(arr) ? arr[0] : null;
       if (m && m.question) {
         ctx.question = m.question;
         ctx.description = (m.description || '').slice(0, 1500);
@@ -2818,7 +2808,6 @@ async function generateMarketInsight(slug) {
         ctx.volume = m.volume24hr ?? m.volume ?? null;
         ctx.change24h = m.oneDayPriceChange ?? null;
       }
-    }
   } catch (e) {
     console.error(`[Insight] Polymarket lookup failed for ${slug}:`, e.message);
   }
@@ -3387,9 +3376,7 @@ const blog = registerBlog(app, {
 // correlations. Read-mostly; reuses web research + the LLM pool.
 async function pmConsensusFor(slug) {
   try {
-    const r = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}`, { headers: { Accept: 'application/json' } });
-    if (!r.ok) return null;
-    const d = await r.json();
+    const d = await fetchGamma(`/markets?slug=${encodeURIComponent(slug)}`);
     const m = Array.isArray(d) ? d[0] : null;
     if (!m) return null;
     let yesPct = null;
@@ -3493,14 +3480,11 @@ app.get('/api/og/market/:slug', async (req, res) => {
     let question = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     let yes = 50;
     try {
-      const r = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}`, { headers: { Accept: 'application/json' } });
-      if (r.ok) {
-        const d = await r.json();
-        const m = Array.isArray(d) ? d[0] : null;
-        if (m) {
-          question = m.question || question;
-          try { yes = Math.round((parseFloat(JSON.parse(m.outcomePrices || '[]')[0]) || 0.5) * 100); } catch (_) {}
-        }
+      const d = await fetchGamma(`/markets?slug=${encodeURIComponent(slug)}`);
+      const m = Array.isArray(d) ? d[0] : null;
+      if (m) {
+        question = m.question || question;
+        try { yes = Math.round((parseFloat(JSON.parse(m.outcomePrices || '[]')[0]) || 0.5) * 100); } catch (_) {}
       }
     } catch (_) {}
     const no = 100 - yes;
@@ -3990,25 +3974,16 @@ async function checkAndResolveMarkets() {
     try {
       // Gamma's /markets?slug= returns ACTIVE markets only by default, so a
       // CLOSED/resolved market came back EMPTY — the cron then treated it as
-      // "gone" and ARCHIVED it instead of resolving. Query closed markets first
-      // (to settle them), then fall back to the open query (still-running ones).
-      let list = [];
-      try {
-        const rc = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&closed=true`);
-        if (rc.ok) list = await rc.json();
-        if (!Array.isArray(list) || list.length === 0) {
-          const ro = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}`);
-          if (ro.ok) list = await ro.json();
-        }
-      } catch (e) { console.error(`[resolve] Polymarket fetch failed for ${market.slug}:`, e.message); continue; }
-
-      if (!Array.isArray(list) || list.length === 0) {
+      // "gone" and ARCHIVED it instead of resolving. The resilient client
+      // tries closed markets first (to settle them), then falls back to the
+      // open query (still-running ones). Retry + backoff + circuit breaker
+      // are handled inside fetchMarketForResolution.
+      const pmMarket = await fetchMarketForResolution(market.slug);
+      if (!pmMarket) {
         // Truly gone from Polymarket (neither open nor closed) → can't auto-resolve.
         if (market.deadline < archiveCutoff) await archiveMarket(market.slug, 'slug gone from Polymarket');
         continue;
       }
-      
-      const pmMarket = list[0];
       const isResolved = pmMarket.closed === true || pmMarket.resolved === true;
       if (!isResolved) {
         if (market.deadline < archiveCutoff) {
@@ -4118,6 +4093,21 @@ async function checkAndResolveMarkets() {
       console.error(`Failed to resolve market ${market.slug}:`, e.message);
     }
   }
+
+  // ── Post-cron Gamma health check ─────────────────────────────────────
+  // If Gamma API had a cluster of failures during this resolution run, alert
+  // via Sentry so the team knows Polymarket may be down — instead of
+  // discovering it when a user asks why nothing resolved for two days.
+  const gammaFailures = drainConsecutiveFailures();
+  if (gammaFailures >= 5) {
+    const msg = `Gamma API had ${gammaFailures} consecutive failures during resolution cron — Polymarket may be down`;
+    console.error(`[resolve] ${msg}`);
+    captureException(new Error(msg), {
+      cron: 'checkAndResolveMarkets',
+      gammaFailures,
+      marketsChecked: marketsToResolve.length,
+    });
+  }
 }
 
 // Event-driven market resolution: instead of polling every 5 minutes, find
@@ -4155,13 +4145,7 @@ async function warmupTopMarkets() {
   console.log('Starting eager market warmup for top active markets...');
   try {
     const limit = 20;
-    const pmUrl = `https://gamma-api.polymarket.com/markets?limit=${limit}&active=true&closed=false&order=volume&ascending=false`;
-    const pmRes = await fetch(pmUrl, { headers: { 'Accept': 'application/json' } });
-    if (!pmRes.ok) {
-      console.error('Failed to fetch top markets for warmup:', pmRes.statusText);
-      return;
-    }
-    const list = await pmRes.json();
+    const list = await fetchGamma(`/markets?limit=${limit}&active=true&closed=false&order=volume&ascending=false`);
     console.log(`Fetched ${list.length} top active markets for warmup.`);
 
     for (const j of list) {
@@ -5504,17 +5488,14 @@ async function broadGammaMarkets() {
   if (Date.now() - _agentMarketIdx.at < 5 * 60 * 1000 && _agentMarketIdx.list.length) return _agentMarketIdx.list;
   const out = [];
   try {
-    const r = await fetch('https://gamma-api.polymarket.com/markets?closed=false&active=true&order=volume&ascending=false&limit=300', { headers: { Accept: 'application/json' } });
-    if (r.ok) {
-      const list = await r.json();
-      const nowSec = Math.floor(Date.now() / 1000);
-      for (const j of (Array.isArray(list) ? list : [])) {
-        if (!j.slug || !j.question) continue;
-        const endRaw = j.endDate || j.endDateIso;
-        const dl = endRaw ? Math.floor(new Date(endRaw).getTime() / 1000) : nowSec + 30 * 86400;
-        if (dl <= nowSec + 3600) continue;
-        out.push({ slug: j.slug, question: j.question, deadline: dl });
-      }
+    const list = await fetchGamma('/markets?closed=false&active=true&order=volume&ascending=false&limit=300');
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const j of (Array.isArray(list) ? list : [])) {
+      if (!j.slug || !j.question) continue;
+      const endRaw = j.endDate || j.endDateIso;
+      const dl = endRaw ? Math.floor(new Date(endRaw).getTime() / 1000) : nowSec + 30 * 86400;
+      if (dl <= nowSec + 3600) continue;
+      out.push({ slug: j.slug, question: j.question, deadline: dl });
     }
   } catch (_) {}
   if (out.length) _agentMarketIdx = { at: Date.now(), list: out };
@@ -5580,11 +5561,9 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
     // Mark which are already deployed (instant) and keep their deadline for on-demand deploy.
     let feed = [];
     try {
-      const pmRes = await fetch('https://gamma-api.polymarket.com/markets?limit=40&active=true&closed=false&order=volume&ascending=false', { headers: { Accept: 'application/json' } });
-      if (pmRes.ok) {
-        const list = await pmRes.json();
-        const nowSec = Math.floor(Date.now() / 1000);
-        feed = list.map(j => {
+      const list = await fetchGamma('/markets?limit=40&active=true&closed=false&order=volume&ascending=false');
+      const nowSec = Math.floor(Date.now() / 1000);
+      feed = list.map(j => {
           const slug = j.slug;
           const cached = deployedMarketsCache.get(slug);
           const endRaw = j.endDate || j.endDateIso;
@@ -5597,7 +5576,6 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
         // Deployed-first so the LLM tends to pick instant, tradeable markets.
         feed.sort((a, b) => (b.deployed ? 1 : 0) - (a.deployed ? 1 : 0));
         feed = feed.slice(0, 25);
-      }
     } catch (e) {
       console.error('agent feed fetch error:', e.message);
     }
@@ -7002,8 +6980,7 @@ async function executeArbitrageStrategy(userId, agentWalletId, balance) {
   
   let pmMarkets = [];
   try {
-    const pmRes = await fetch('https://gamma-api.polymarket.com/markets?limit=30&active=true&closed=false', { headers: { Accept: 'application/json' } });
-    if (pmRes.ok) pmMarkets = await pmRes.json();
+    pmMarkets = await fetchGamma('/markets?limit=30&active=true&closed=false');
   } catch (e) {
     console.error('Arbitrage strategy Polymarket fetch error:', e.message);
     return;
@@ -7517,8 +7494,7 @@ async function houseAgentResearch() {
 
   let pmMarkets = [];
   try {
-    const r = await fetch('https://gamma-api.polymarket.com/markets?limit=100&active=true&closed=false&order=volume&ascending=false', { headers: { Accept: 'application/json' } });
-    if (r.ok) pmMarkets = await r.json();
+    pmMarkets = await fetchGamma('/markets?limit=100&active=true&closed=false&order=volume&ascending=false');
   } catch (e) {
     console.error('[Pulse] research fetch error:', e.message);
     return [];
