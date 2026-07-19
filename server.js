@@ -6563,18 +6563,17 @@ const server = app.listen(PORT, async () => {
   console.log(`[UMA] Optimistic Oracle resolution: ${UMA_RESOLUTION && UMA_ADAPTER_ADDRESS ? `ENABLED (adapter ${UMA_ADAPTER_ADDRESS}, oracle ${UMA_OOV2_ADDRESS})` : 'disabled (legacy direct resolve)'}`);
   console.log(`[Wallets] account type: ${WALLET_ACCOUNT_TYPE}; Circle webhook signature enforce: ${CIRCLE_WEBHOOK_ENFORCE}`);
   await loadDeployedMarkets();
-  // One-time sweep of time-due work (replaces the old polling crons). These
-  // catch anything that came due while the server was down; from here on the
-  // event bus + per-market deadline timers drive everything.
-  // DEFERRED by 10s so the HTTP server is fully ready to accept traffic before
-  // heavy on-chain work begins (market warmup deploys, UMA settlement, etc.
-  // block the event loop and caused 503 crashes on a 512MB Heroku dyno).
+  // One-time sweep of time-due work — DEFERRED by 30s so the HTTP server is
+  // fully ready to accept traffic before any on-chain work begins.
+  // warmupTopMarkets() is DISABLED — it deploys 20 markets sequentially at
+  // boot (each 5-10s of viem writeContract), totaling 2-3 minutes of blocked
+  // event loop → 503 + CORS errors on Heroku's 512MB dyno. Markets deploy
+  // on-demand when users trade them anyway.
   setTimeout(() => {
     checkAndResolveMarkets().catch(console.error);
     scheduleNextMarketResolution();
     sweepPendingLimitOrders().catch(console.error);
-    warmupTopMarkets().catch(console.error);
-  }, 10_000).unref?.();
+  }, 30_000).unref?.();
   // Treasury low-balance monitor (alerts via ALERT_WEBHOOK_URL if configured).
   checkTreasuryBalance().catch(console.error);
   // Leaderboard needs the wallet mapping for on-chain position reads
@@ -8035,11 +8034,13 @@ app.get('/api/economy/feed', generalLimiter, async (req, res) => {
 if (SAGE_AGENT) {
   // Bring Sage (creator-agent) online first, so Pulse can buy its on-chain
   // attested signal on the very first cycle (agent-to-agent value transfer).
-  setTimeout(() => { ensureSageAgent().catch((e) => console.error('[Sage] boot error:', e.message)); }, 20 * 1000);
+  // Delayed 60s so the HTTP server is fully operational before any on-chain
+  // work begins (Sage deploys a SignalRegistry attestation = viem writeContract).
+  setTimeout(() => { ensureSageAgent().catch((e) => console.error('[Sage] boot error:', e.message)); }, 60 * 1000);
 }
 
 if (HOUSE_AGENT) {
-  setTimeout(houseAgentTick, 45 * 1000); // first cycle shortly after boot
+  setTimeout(houseAgentTick, 90 * 1000); // delayed so HTTP server is ready first
   // Subsequent cycles are event-driven: the house agent reacts to new market
   // activity (trades) and freshly activated markets instead of polling. The
   // cooldown inside houseAgentTick still bounds the real cadence.
@@ -8070,7 +8071,12 @@ const swarm = registerSwarm(app, {
   getOrDeployMarket,
   deployedMarketsCache,
 });
-if (typeof swarm.start === 'function') swarm.start();
+// Delayed 90s so the HTTP server is fully operational before agents start
+// trading + deploying markets on-chain (each trade = viem writeContract that
+// blocks the event loop for 5-10s → 503 + CORS errors on 512MB dyno).
+if (typeof swarm.start === 'function') {
+  setTimeout(() => swarm.start(), 90 * 1000);
+}
 
 // Autonomous streaming agent: a trader agent
 // rents a creator's live alpha feed per second, choosing the rate by expected
