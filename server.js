@@ -4154,9 +4154,14 @@ function scheduleNextMarketResolution() {
   }
   if (!Number.isFinite(nearest)) return;
   const delayMs = Math.max(0, (nearest - now) * 1000);
-  // Cap at 1h so a far-future deadline doesn't hold a stale timer if markets
-  // are added/activated in the meantime (their MARKET_ACTIVATED event reschedules).
-  const cappedDelay = Math.min(delayMs, 60 * 60 * 1000);
+  // CRITICAL: when a market is past-deadline but not yet resolved on Polymarket,
+  // `nearest < now` → delayMs = 0 → the timer fires immediately → re-arms →
+  // infinite tight loop that starves the event loop (503 + 429 from Polymarket).
+  // Enforce a MINIMUM 5-minute re-check delay so past-due markets are checked
+  // periodically, not in a tight loop.
+  const MIN_RECHECK_MS = 5 * 60 * 1000;
+  // Cap at 1h so a far-future deadline doesn't hold a stale timer.
+  const cappedDelay = Math.max(MIN_RECHECK_MS, Math.min(delayMs, 60 * 60 * 1000));
   _resolutionTimer = setTimeout(() => {
     _resolutionTimer = null;
     checkAndResolveMarkets().catch(console.error).finally(() => scheduleNextMarketResolution());
