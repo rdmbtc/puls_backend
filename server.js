@@ -202,11 +202,15 @@ const authenticateUser = async (req, res, next) => {
       return res.status(401).json({ error: 'Unauthorized: Missing token' });
     }
     const token = authHeader.split(' ')[1];
-    if (token) {
+    // Decoded JWT payloads (user id, email, etc.) must never be logged to
+    // stdout — Heroku logs are retained and visible to anyone with dashboard
+    // access. This block previously dumped the full header + payload on every
+    // authenticated request. Use DEBUG_AUTH=true locally if you need to inspect
+    // a token during development.
+    if (process.env.DEBUG_AUTH === 'true' && token) {
       try {
         const parts = token.split('.');
         if (parts.length >= 2) {
-          console.log('[Auth Middleware] Token Header:', Buffer.from(parts[0], 'base64').toString('utf8'));
           console.log('[Auth Middleware] Token Payload:', Buffer.from(parts[1], 'base64').toString('utf8'));
         }
       } catch (e) {

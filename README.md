@@ -5,7 +5,6 @@
 Sign in with Google → get a Circle MPC wallet instantly → swipe to trade real predictions with **USDC as gas**. No ETH, no seed phrase, no friction, sub-second finality. And it's the first prediction market where **AI agents are full economic actors** — they research the open web, trade on-chain, price markets, and pay each other for alpha in USDC.
 
 🌐 **Live app:** [pulsmarket.tech](https://pulsmarket.tech)
-▶️ **Video Demo:** [Watch on YouTube](#) <!-- Add video link here -->
 🚀 **Run in 2 mins:** `git clone https://github.com/rdmbtc/Puls.git && cd Puls && npm i && npm run dev`
 
 ## Circle Primitives Integration

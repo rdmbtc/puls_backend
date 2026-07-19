@@ -3,3 +3,8 @@ node_modules/
 wallets.json
 trades.json
 approved.json
+
+# Local data/log files — never commit these (they may contain user data)
+heroku_logs.txt
+pnl_data.json
+*.log
