@@ -19,6 +19,7 @@
     "@circle-fin/user-controlled-wallets": "^10.3.1",
     "@circle-fin/x402-batching": "^2.0.4",
     "@composio/core": "^0.14.0",
+    "@sentry/node": "^10.66.0",
     "@supabase/supabase-js": "^2.105.4",
     "@x402/core": "^2.15.0",
     "@x402/evm": "^2.15.0",
@@ -29,10 +30,14 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "pg": "^8.21.0",
+    "pino": "^10.3.1",
     "socket.io": "^4.8.3",
     "undici": "^6.21.0",
     "uuid": "^14.0.0",
     "viem": "^2.50.4",
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "pino-pretty": "^13.1.3"
   }
 }

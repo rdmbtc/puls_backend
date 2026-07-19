@@ -1,6 +1,12 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import os from 'node:os';
+
+// Observability MUST be initialized before express() so Sentry can
+// instrument the middleware stack. Safe no-op when SENTRY_DSN is unset.
+import { initObservability, logger, requestId, sentryRequestHandler, sentryErrorHandler, captureException } from './lib/observability.js';
+initObservability();
+
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
@@ -37,9 +43,13 @@ import { cache } from './lib/cache.js';
 import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
 
-// Prevent unhandled promise rejections from crashing the server
+// Prevent unhandled promise rejections from crashing the server.
+// Report to Sentry (if configured) so we get paged, not just a log line.
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('[UNHANDLED REJECTION]', reason?.message || reason);
+  const msg = reason?.message || String(reason);
+  logger?.error?.({ reason: msg, promise: String(promise) }, 'unhandledRejection');
+  captureException(reason instanceof Error ? reason : new Error(msg));
+  console.error('[UNHANDLED REJECTION]', msg);
 });
 
 // Real rate limiters (previously no-ops). Tune via env if needed.
@@ -176,6 +186,8 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use(generalLimiter); // Apply general rate limit globally
+app.use(requestId);      // Generate/propagate x-request-id for log correlation
+app.use(sentryRequestHandler); // Sentry performance + error instrumentation
 
 // Supabase JWT Authenticate Middleware
 const authenticateUser = async (req, res, next) => {
@@ -3438,7 +3450,16 @@ registerAgentPnl(app, {
   circle,
 });
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+// /health — quick liveness probe (returns 200 immediately). Use for
+// Heroku's restart-on-failure check + uptime monitors that just need "up?".
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    uptime: Math.floor(process.uptime()),
+    env: process.env.NODE_ENV || 'development',
+    requestId: req.id,
+  });
+});
 
 // ── Image Proxy ──────────────────────────────────────────────────────────────
 // Bypasses CORS restrictions for CanvasKit in Flutter Web.
@@ -6522,6 +6543,10 @@ const PORT = process.env.PORT || 3000;
 // and writes fan out via eventBus. (ESM top-level await.)
 await cache.hydrate(supabase);
 cache.subscribe();
+
+// Sentry error handler — MUST be after all routes, before app.listen.
+// Captures unhandled exceptions in route handlers and forwards them as 500s.
+app.use(sentryErrorHandler);
 
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
