@@ -355,6 +355,7 @@ async function pingIndexNow(urls) {
   const INDEXNOW_KEY = '51e360e20e504c2ea2d600490b41c099';
   const INDEXNOW_HOST = 'app.pulsmarket.tech';
   try {
+    // IndexNow API accepts up to 10,000 URLs per request.
     const res = await fetch('https://api.indexnow.org/indexnow', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -362,7 +363,7 @@ async function pingIndexNow(urls) {
         host: INDEXNOW_HOST,
         key: INDEXNOW_KEY,
         keyLocation: `https://${INDEXNOW_HOST}/${INDEXNOW_KEY}.txt`,
-        urlList: urls
+        urlList: urls.slice(0, 10000)
       })
     });
     console.log(`[IndexNow] Pinged ${urls.length} URL(s), response: ${res.status}`);
@@ -370,6 +371,14 @@ async function pingIndexNow(urls) {
     console.error(`[IndexNow] Ping error: ${err.message}`);
   }
 }
+
+// Serve the IndexNow key file so search engines can verify ownership.
+// Without this, IndexNow pings return 403 (key not found) → 0 pages indexed.
+app.get('/51e360e20e504c2ea2d600490b41c099.txt', (req, res) => {
+  res.set('Content-Type', 'text/plain');
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.send('51e360e20e504c2ea2d600490b41c099');
+});
 
 const supabaseAnon = createClient(
   process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
@@ -6655,6 +6664,19 @@ const server = app.listen(PORT, async () => {
     checkAndResolveMarkets().catch(console.error);
     scheduleNextMarketResolution();
     sweepPendingLimitOrders().catch(console.error);
+    // Boot-time IndexNow ping: submit all known market URLs so search engines
+    // re-index them. This runs once per boot (not polling).
+    setTimeout(() => {
+      try {
+        const marketUrls = Array.from(deployedMarketsCache.keys())
+          .slice(0, 500) // IndexNow caps at 10k but 500 is plenty
+          .map(slug => `https://app.pulsmarket.tech/m/${slug}`);
+        // Also ping the main pages
+        marketUrls.push('https://app.pulsmarket.tech/');
+        marketUrls.push('https://pulsmarket.tech/');
+        pingIndexNow(marketUrls).catch(console.error);
+      } catch (_) {}
+    }, 60_000).unref?.();
   }, 30_000).unref?.();
   // Treasury low-balance monitor (alerts via ALERT_WEBHOOK_URL if configured).
   checkTreasuryBalance().catch(console.error);
