@@ -994,7 +994,13 @@ async function getWalletId(userId) {
 }
 
 async function saveWallet(userId, walletId) {
-  await supabase.from('wallets').upsert({ user_id: userId, wallet_id: walletId });
+  const { error } = await supabase.from('wallets').upsert({ user_id: userId, wallet_id: walletId });
+  if (error) {
+    // CRITICAL: if this fails, the wallet exists in Circle but NOT in the DB.
+    // On next restart, getWalletId returns null → creates ANOTHER wallet →
+    // agent address changes every restart. Log loudly so it's caught.
+    console.error(`[saveWallet] CRITICAL: upsert failed for ${userId}:`, error.message);
+  }
   // Fan out so the in-memory cache indexes the new wallet without a re-query.
   // Address is fetched lazily later (Circle SDK); cache indexes by user_id now.
   eventBus.safeEmit(EVENTS.WALLET_CREATED, {
@@ -1287,6 +1293,7 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
 });
 
 // POST /api/wallet/get-or-create
+const _userWalletCreating = new Set();
 app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
     const { userId } = req.body;
@@ -1295,7 +1302,16 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
     const existing = await getWalletId(userId);
     if (existing) return res.json(await getWalletInfo(existing));
 
-    const setId = await ensureWalletSet();
+    // Race condition guard: prevent duplicate wallet creation on double-tap
+    if (_userWalletCreating.has(userId)) {
+      while (_userWalletCreating.has(userId)) await new Promise(r => setTimeout(r, 100));
+      const walletId = await getWalletId(userId);
+      if (walletId) return res.json(await getWalletInfo(walletId));
+    }
+
+    _userWalletCreating.add(userId);
+    try {
+      const setId = await ensureWalletSet();
     const createRes = await circle.createWallets({
       accountType: WALLET_ACCOUNT_TYPE, // SCA → gasless via Gas Station (see WALLET_ACCOUNT_TYPE)
       blockchains: ['ARC-TESTNET'],
@@ -1323,6 +1339,9 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
     if (wallet.address) sendWelcomeBonus(userId, wallet.address).catch(() => {});
 
     res.json(await getWalletInfo(wallet.id));
+    } finally {
+      _userWalletCreating.delete(userId);
+    }
   } catch (e) {
     console.error('get-or-create:', e.message);
     res.status(500).json({ error: e.message });
@@ -7190,17 +7209,32 @@ let sageSignalId = null;       // creator_signals.id of Sage's live signal
 let sageOnchainTx = null;      // attestation tx
 let sageEnsured = false;
 
+let _houseWalletCreating = false;
 async function ensureHouseAgentWallet() {
+  // Race condition guard: prevent concurrent wallet creation
+  if (_houseWalletCreating) {
+    while (_houseWalletCreating) await new Promise(r => setTimeout(r, 100));
+    const existing = await getWalletId(HOUSE_AGENT_KEY);
+    if (existing) {
+      const info = await getWalletInfo(existing);
+      return { walletId: existing, address: info.address, balance: parseFloat(info.usdcBalance) || 0 };
+    }
+  }
   let walletId = await getWalletId(HOUSE_AGENT_KEY);
   if (!walletId) {
-    const setId = await ensureWalletSet();
-    const createRes = await circle.createWallets({
-      accountType: WALLET_ACCOUNT_TYPE, blockchains: ['ARC-TESTNET'], count: 1, walletSetId: setId,
-    });
-    const w = createRes.data.wallets[0];
-    walletId = w.id;
-    await saveWallet(HOUSE_AGENT_KEY, w.id);
-    console.log(`[Pulse] Created house agent Circle wallet ${w.address}`);
+    _houseWalletCreating = true;
+    try {
+      const setId = await ensureWalletSet();
+      const createRes = await circle.createWallets({
+        accountType: WALLET_ACCOUNT_TYPE, blockchains: ['ARC-TESTNET'], count: 1, walletSetId: setId,
+      });
+      const w = createRes.data.wallets[0];
+      walletId = w.id;
+      await saveWallet(HOUSE_AGENT_KEY, w.id);
+      console.log(`[Pulse] Created house agent Circle wallet ${w.address}`);
+    } finally {
+      _houseWalletCreating = false;
+    }
   }
   const info = await getWalletInfo(walletId);
 
@@ -7277,19 +7311,36 @@ async function ensureHouseAgentWallet() {
 // identity + ONE live, on-chain-attested Signal in creator_signals that other
 // agents can buy. Idempotent; runs once per process. Returns Sage's address +
 // the live signal id, or null if unavailable.
+let _sageWalletCreating = false;
 async function ensureSageAgent() {
   if (!SAGE_AGENT) return null;
   try {
+    // Race condition guard
+    if (_sageWalletCreating) {
+      while (_sageWalletCreating) await new Promise(r => setTimeout(r, 100));
+      const existing = await getWalletId(SAGE_AGENT_KEY);
+      if (existing) {
+        const info = await getWalletInfo(existing);
+        // Skip the bootstrap funding — the other call handled it
+        sageEnsured = true;
+        return { walletId: existing, address: info.address, balance: parseFloat(info.usdcBalance) || 0 };
+      }
+    }
     // 1) Wallet
     let walletId = await getWalletId(SAGE_AGENT_KEY);
     if (!walletId) {
-      const setId = await ensureWalletSet();
-      const createRes = await circle.createWallets({
-        accountType: WALLET_ACCOUNT_TYPE, blockchains: ['ARC-TESTNET'], count: 1, walletSetId: setId,
-      });
-      walletId = createRes.data.wallets[0].id;
-      await saveWallet(SAGE_AGENT_KEY, walletId);
-      console.log(`[Sage] created creator-agent wallet`);
+      _sageWalletCreating = true;
+      try {
+        const setId = await ensureWalletSet();
+        const createRes = await circle.createWallets({
+          accountType: WALLET_ACCOUNT_TYPE, blockchains: ['ARC-TESTNET'], count: 1, walletSetId: setId,
+        });
+        walletId = createRes.data.wallets[0].id;
+        await saveWallet(SAGE_AGENT_KEY, walletId);
+        console.log(`[Sage] created creator-agent wallet ${createRes.data.wallets[0].address}`);
+      } finally {
+        _sageWalletCreating = false;
+      }
     }
     const info = await getWalletInfo(walletId);
 
