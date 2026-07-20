@@ -4100,15 +4100,21 @@ async function checkAndResolveMarkets() {
       // ── UMA optimistic oracle path ────────────────────────────────────────
       // The request can be opened before the outcome is known; proposing and
       // settling happen on later cron ticks as the OOV2 state machine advances.
+      // FALLBACK: if UMA processing fails (RPC down, timeout, etc.) or returns
+      // pending for too long, fall through to direct resolution so markets
+      // don't stay unresolved forever.
       if (UMA_RESOLUTION && UMA_ADAPTER_ADDRESS) {
         let umaResult = 'fallback';
         try {
           umaResult = await processUmaMarket(market, outcome);
         } catch (e) {
-          console.error(`[UMA] processing failed for ${market.slug}:`, e.message);
+          console.error(`[UMA] processing failed for ${market.slug}: ${e.message} — falling back to direct resolve`);
+          umaResult = 'fallback';
+        }
+        if (umaResult === 'pending') {
+          console.log(`[UMA] ${market.slug} still pending — will check again next cycle`);
           continue;
         }
-        if (umaResult === 'pending') continue;
         if (umaResult === 'resolved') {
           // Read the final outcome from chain (source of truth after settlement).
           const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
@@ -4223,7 +4229,7 @@ function scheduleNextMarketResolution() {
   // infinite tight loop that starves the event loop (503 + 429 from Polymarket).
   // Enforce a MINIMUM 5-minute re-check delay so past-due markets are checked
   // periodically, not in a tight loop.
-  const MIN_RECHECK_MS = 5 * 60 * 1000;
+  const MIN_RECHECK_MS = 2 * 60 * 1000; // 2 min — faster resolution of past-due markets
   // Cap at 1h so a far-future deadline doesn't hold a stale timer.
   const cappedDelay = Math.max(MIN_RECHECK_MS, Math.min(delayMs, 60 * 60 * 1000));
   _resolutionTimer = setTimeout(() => {
