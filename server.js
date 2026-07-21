@@ -1224,6 +1224,32 @@ async function getWalletInfo(walletId) {
       });
       exactBalance = (Number(balanceRaw) / 1_000_000).toString();
       balance = (Number(balanceRaw) / 1_000_000).toFixed(2);
+
+      // CRITICAL: the Canteen RPC can return stale data (e.g. 0 balance for
+      // an agent that was topped up) without throwing an error. If balance
+      // is 0, verify against the public Arc RPC to catch stale reads.
+      if (Number(balanceRaw) === 0) {
+        try {
+          const fallbackRpc = 'https://rpc.testnet.arc.network';
+          const padded = address.toLowerCase().replace('0x', '').padStart(64, '0');
+          const fbRes = await fetch(fallbackRpc, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0', method: 'eth_call',
+              params: [{ to: USDC, data: `0x70a08231${padded}` }, 'latest'],
+              id: 1,
+            }),
+          }).then(r => r.json());
+          if (fbRes.result && fbRes.result.length >= 2) {
+            const fbRaw = BigInt(fbRes.result);
+            if (fbRaw > 0n) {
+              exactBalance = (Number(fbRaw) / 1_000_000).toString();
+              balance = (Number(fbRaw) / 1_000_000).toFixed(2);
+            }
+          }
+        } catch (_) {}
+      }
     } catch (err) {
       console.warn(`On-chain balance check failed for ${address}:`, err.message);
       // FALLBACK: try the public Arc RPC directly (the Canteen RPC node can
