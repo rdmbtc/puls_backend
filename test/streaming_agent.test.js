@@ -30,13 +30,13 @@ test('RATE scales with bankroll, clamped to MAX for a whale', () => {
   const small = decideStream({ bankrollUsdc: 2, conviction: 0.7 });
   const whale = decideStream({ bankrollUsdc: 100000, conviction: 0.7 });
   assert.ok(whale.ratePerSecUsdc >= small.ratePerSecUsdc);
-  assert.equal(whale.ratePerSecUsdc, 0.02); // clamped to MAX_RATE
+  assert.equal(whale.ratePerSecUsdc, 0.005); // clamped to MAX_RATE (reduced from 0.02)
 });
 
 test('RATE clamped to MIN for a high-conviction but tiny bankroll', () => {
   const d = decideStream({ bankrollUsdc: 0.5, conviction: 0.9 });
   assert.equal(d.worthIt, true);
-  assert.equal(d.ratePerSecUsdc, 0.0005); // clamped to MIN_RATE
+  assert.equal(d.ratePerSecUsdc, 0.000225); // clamped to MIN_RATE (reduced)
 });
 
 test('WHEN-TO-STOP: keep paying early, stop once marginal value < price', () => {

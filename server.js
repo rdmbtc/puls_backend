@@ -3605,9 +3605,62 @@ app.get('/api/og/market/:slug', async (req, res) => {
     res.set('Cache-Control', 'public, max-age=300');
     res.send(svg);
   } catch (e) {
-    res.status(500).send('');
+    res.status(500).json({ error: e.message });
   }
 });
+
+// ── Web3 (MetaMask) endpoints ──────────────────────────────────────────────
+// MetaMask users trade directly on-chain — they don't need Circle SCA wallets.
+// These endpoints accept on-chain tx hashes, verify them, and record the trades.
+// No requireVerifiedUser — web3 guests are allowed (they signed on-chain).
+
+// POST /api/trade/claim-external — record a claim that a MetaMask user made
+// directly on-chain. Verifies the tx sender + market contract.
+app.post('/api/trade/claim-external', tradeLimiter, async (req, res) => {
+  try {
+    const { userId, txHash, marketId } = req.body;
+    if (!userId || !txHash || !marketId) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+    const normalizedHash = normalizeTxHash(txHash);
+    // Verify the transaction on-chain
+    try {
+      const receipt = await publicClient.getTransactionReceipt({ hash: normalizedHash });
+      if (!receipt) return res.status(400).json({ error: 'Transaction not found on-chain' });
+      if (receipt.status !== 'success') return res.status(400).json({ error: 'Transaction failed on-chain' });
+      // Verify sender matches
+      const expectedAddr = userId.replace('eth_', '').toLowerCase();
+      if (receipt.from.toLowerCase() !== expectedAddr) {
+        return res.status(403).json({ error: 'Sender mismatch' });
+      }
+      // Verify market contract
+      if (receipt.to.toLowerCase() !== marketId.toLowerCase()) {
+        return res.status(403).json({ error: 'Market mismatch' });
+      }
+    } catch (err) {
+      return res.status(400).json({ error: `On-chain verification failed: ${err.message}` });
+    }
+    // Dedup: check if this tx_hash already recorded
+    const { data: existing } = await supabase.from('trades').select('id').eq('tx_hash', normalizedHash).limit(1);
+    if (existing && existing.length > 0) return res.json({ ok: true, alreadyClaimed: true });
+    // Record the claim
+    await saveTrade(userId, {
+      tx_id: `ext_${Date.now()}`,
+      side: 'CLAIM',
+      usdc_amount: 0,
+      entry_price: 0,
+      question: 'Claim Winnings (MetaMask)',
+      market_id: marketId,
+      state: 'COMPLETE',
+      tx_hash: normalizedHash,
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('claim-external error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 // Deep health check for demo-day readiness: pings every external dependency and
 // reports the treasury balance in one call. Returns 200 when all checks pass,
