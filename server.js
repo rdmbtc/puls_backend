@@ -1226,14 +1226,37 @@ async function getWalletInfo(walletId) {
       balance = (Number(balanceRaw) / 1_000_000).toFixed(2);
     } catch (err) {
       console.warn(`On-chain balance check failed for ${address}:`, err.message);
+      // FALLBACK: try the public Arc RPC directly (the Canteen RPC node can
+      // be stale — it sometimes lags behind the canonical chain state by
+      // hours or days, showing wrong balances to users).
       try {
-        const balRes = await circle.getWalletTokenBalance({ id: walletId });
-        const usdcToken = balRes.data.tokenBalances?.find(
-          t => t.token?.address?.toLowerCase() === USDC.toLowerCase() || t.token?.symbol === 'USDC'
-        );
-        exactBalance = usdcToken?.amount ?? '0';
-        balance = parseFloat(exactBalance).toFixed(2);
-      } catch (_) {}
+        const fallbackRpc = 'https://rpc.testnet.arc.network';
+        const padded = address.toLowerCase().replace('0x', '').padStart(64, '0');
+        const fbRes = await fetch(fallbackRpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', method: 'eth_call',
+            params: [{ to: USDC, data: `0x70a08231${padded}` }, 'latest'],
+            id: 1,
+          }),
+        }).then(r => r.json());
+        if (fbRes.result && fbRes.result.length >= 2) {
+          const raw = BigInt(fbRes.result);
+          exactBalance = (Number(raw) / 1_000_000).toString();
+          balance = (Number(raw) / 1_000_000).toFixed(2);
+        }
+      } catch (fbErr) {
+        // Last resort: Circle SDK balance
+        try {
+          const balRes = await circle.getWalletTokenBalance({ id: walletId });
+          const usdcToken = balRes.data.tokenBalances?.find(
+            t => t.token?.address?.toLowerCase() === USDC.toLowerCase() || t.token?.symbol === 'USDC'
+          );
+          exactBalance = usdcToken?.amount ?? '0';
+          balance = parseFloat(exactBalance).toFixed(2);
+        } catch (_) {}
+      }
     }
 
     return { walletId, address, usdcBalance: balance, exactUsdcBalance: exactBalance };
