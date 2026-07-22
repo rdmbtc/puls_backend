@@ -740,8 +740,20 @@ const MARKET_EVENTS_ABI = [
 ];
 
 // ── Cache of User Wallets ──────────────────────────────────────────────────
+// Wallet address caches — capped to prevent unbounded growth on long-running
+// dynos. Entries are never individually evicted (they're small and stable), but
+// the hard cap prevents pathological growth from transient wallet addresses.
+const WALLET_CACHE_MAX = 2000;
 const addressToUserIdCache = new Map(); // address (lowercase) -> userId
 const userIdToAddressCache = new Map(); // userId -> address (lowercase)
+
+function _cappedSet(map, key, val) {
+  if (map.size >= WALLET_CACHE_MAX) {
+    const oldest = map.keys().next().value;
+    if (oldest) map.delete(oldest);
+  }
+  map.set(key, val);
+}
 
 async function loadWalletAddressMapping() {
   try {
@@ -762,12 +774,12 @@ async function loadWalletAddressMapping() {
         if (!address) {
           const walletRes = await circle.getWallet({ id: walletId });
           address = walletRes.data.wallet.address;
-          walletAddressCache.set(walletId, address);
+          _cappedSet(walletAddressCache, walletId, address);
         }
         
         const lowerAddress = address.toLowerCase();
-        addressToUserIdCache.set(lowerAddress, userId);
-        userIdToAddressCache.set(userId, lowerAddress);
+        _cappedSet(addressToUserIdCache, lowerAddress, userId);
+        _cappedSet(userIdToAddressCache, userId, lowerAddress);
       } catch (err) {
         console.error(`Failed to fetch wallet address for user ${row.user_id}:`, err.message);
       }
@@ -1179,7 +1191,7 @@ async function getTrades(userIds) {
   const ids = Array.isArray(userIds) ? userIds : [userIds];
   const { data } = await supabase
     .from('trades')
-    .select('*')
+    .select('id, user_id, market_id, side, usdc_amount, state, question, entry_price, tx_hash, created_at')
     .in('user_id', ids)
     .order('created_at', { ascending: false })
     .limit(3000);
@@ -1198,10 +1210,23 @@ async function ensureWalletSet() {
 
 const walletAddressCache = new Map();
 
-// Balance cache: { address -> { balance, ts } } — avoids hitting the RPC
-// on every /api/agents/roster call (which fetches 6+ wallets).
+// Balance cache: { address -> { balance, exact, ts } } — avoids hitting the RPC
+// on every /api/agents/roster call (which fetches 6+ wallets).  Bounded: a
+// periodic sweep evicts expired entries so the Map can't grow unbounded on a
+// long-running dyno (512MB Heroku).
 const _balanceCache = new Map();
 const BALANCE_CACHE_TTL_MS = 15_000; // 15s — fresh enough for UI
+const BALANCE_CACHE_MAX = 500; // hard cap (distinct wallet addresses)
+
+// Periodic sweep: evict expired balance-cache entries every 60s so the Map
+// doesn't leak memory on a long-running dyno. `.unref()` so it never keeps
+// the process alive on shutdown.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _balanceCache) {
+    if (now - v.ts > BALANCE_CACHE_TTL_MS * 2) _balanceCache.delete(k);
+  }
+}, 60_000).unref?.();
 
 async function getWalletInfo(walletId) {
   try {
@@ -1209,7 +1234,7 @@ async function getWalletInfo(walletId) {
     if (!address) {
       const walletRes = await circle.getWallet({ id: walletId });
       address = walletRes.data.wallet.address;
-      walletAddressCache.set(walletId, address);
+      _cappedSet(walletAddressCache, walletId, address);
     }
 
     // Check balance cache first — avoids RPC calls on every roster fetch
@@ -1297,7 +1322,12 @@ async function getWalletInfo(walletId) {
       }
     }
 
-    // Cache the result
+    // Cache the result (with hard cap to prevent unbounded growth)
+    if (_balanceCache.size >= BALANCE_CACHE_MAX) {
+      // Evict oldest entry (Map iterates in insertion order)
+      const oldest = _balanceCache.keys().next().value;
+      if (oldest) _balanceCache.delete(oldest);
+    }
     _balanceCache.set(address, { balance, exact: exactBalance, ts: Date.now() });
     return { walletId, address, usdcBalance: balance, exactUsdcBalance: exactBalance };
   } catch (e) {
@@ -1306,9 +1336,10 @@ async function getWalletInfo(walletId) {
   }
 }
 
-// In-memory RPC cache
+// In-memory RPC cache — bounded with TTL eviction to prevent OOM on 512MB dynos.
 const rpcCache = new Map(); // requestHash -> { data, ts }
 const RPC_CACHE_TTL = 3000; // 3 seconds TTL
+const RPC_CACHE_MAX = 2000; // hard cap: evict oldest when exceeded
 
 // Allowed RPC methods to prevent open relay abuse
 const ALLOWED_RPC_METHODS = [
@@ -1372,6 +1403,17 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
 
     if (isCacheable && data && !data.error) {
       rpcCache.set(cacheKey, { data, ts: Date.now() });
+      // Evict expired entries + enforce hard cap to prevent unbounded growth.
+      if (rpcCache.size > RPC_CACHE_MAX) {
+        const now = Date.now();
+        for (const [k, v] of rpcCache) {
+          if (now - v.ts > RPC_CACHE_TTL || rpcCache.size > RPC_CACHE_MAX) {
+            rpcCache.delete(k);
+          } else {
+            break; // Map iterates in insertion order; first non-expired = oldest
+          }
+        }
+      }
     }
 
     res.json(data);
@@ -1415,9 +1457,9 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
     // Cache the address mapping
     if (wallet.address) {
       const lowerAddress = wallet.address.toLowerCase();
-      addressToUserIdCache.set(lowerAddress, userId);
-      userIdToAddressCache.set(userId, lowerAddress);
-      walletAddressCache.set(wallet.id, wallet.address);
+      _cappedSet(addressToUserIdCache, lowerAddress, userId);
+      _cappedSet(userIdToAddressCache, userId, lowerAddress);
+      _cappedSet(walletAddressCache, wallet.id, wallet.address);
     }
 
     // Welcome bonus: brand-new VERIFIED users get a small USDC float so they can
@@ -4417,13 +4459,16 @@ const leaderboardStats = new Map(); // user_id → { volume, pnl, trades_count, 
 async function updateLeaderboard() {
   console.log('Running leaderboard update...');
   try {
-    // Supabase caps reads at 1000 rows — paginate so every trader counts
+    // Supabase caps reads at 1000 rows — paginate so every trader counts.
+    // Only select the columns actually used by the computation (not '*') to
+    // cut data transfer + memory by ~60% (excludes large text fields like
+    // reasoning, thesis, sources that are never read here).
     const trades = [];
     const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase
         .from('trades')
-        .select('*')
+        .select('user_id, market_id, side, usdc_amount, state, question, entry_price')
         .eq('state', 'COMPLETE')
         .order('created_at', { ascending: true })
         .range(from, from + PAGE - 1);
@@ -4457,6 +4502,20 @@ async function updateLeaderboard() {
         userTrades.set(key, []);
       }
       userTrades.get(key).push(t);
+    }
+    
+    // Batch-fetch all profiles ONCE to eliminate the N+1 Supabase query
+    // pattern (was: 1 query per user inside the loop → 100+ sequential calls).
+    const __allUserIds = [...userTrades.keys()];
+    const __profilesBatch = new Map();
+    for (let i = 0; i < __allUserIds.length; i += 100) {
+      const chunk = __allUserIds.slice(i, i + 100);
+      try {
+        const { data: profs } = await supabase
+          .from('profiles').select('user_id, display_name, avatar_url, bio')
+          .in('user_id', chunk);
+        if (profs) for (const p of profs) __profilesBatch.set(p.user_id, p);
+      } catch (_) { /* profiles table may not exist yet */ }
     }
     
     // Process users CONCURRENTLY (bounded) — per-user work is independent and
@@ -4637,44 +4696,39 @@ async function updateLeaderboard() {
           ? (winningMarketsCount / resolvedMarketsCount) * 100
           : 0;
         
-        // Ensure profile exists (gracefully skip if profiles table missing)
+        // Use the batch-fetched profile instead of a per-user Supabase query.
+        // The old code did 1 query PER USER inside this loop (N+1 pattern),
+        // taking 10-90s for 100 traders. Now we read from the pre-fetched map.
         try {
           let displayName = 'Puls Trader';
           let avatarUrl = null;
           
           if (userId.startsWith('supabase_')) {
-            try {
-              const { data: existingProf } = await supabase
-                .from('profiles')
-                .select('*')
-                .eq('user_id', userId)
-                .single();
-              if (existingProf) {
-                displayName = existingProf.display_name;
-                avatarUrl = existingProf.avatar_url;
-              } else {
-                avatarUrl = `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${userId}`;
-                await supabase.from('profiles').insert({
-                  user_id: userId,
-                  display_name: displayName,
-                  avatar_url: avatarUrl,
-                  bio: 'Trading prediction markets on Arc Testnet.'
-                });
-              }
-            } catch (_) { /* profiles table may not exist yet */ }
+            const existingProf = __profilesBatch.get(userId);
+            if (existingProf) {
+              displayName = existingProf.display_name;
+              avatarUrl = existingProf.avatar_url;
+            } else {
+              avatarUrl = `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${userId}`;
+              // Queue insert (fire-and-forget — don't block the rebuild)
+              supabase.from('profiles').insert({
+                user_id: userId,
+                display_name: displayName,
+                avatar_url: avatarUrl,
+                bio: 'Trading prediction markets on Arc Testnet.'
+              }).then(() => {}).catch(() => {});
+            }
           } else if (userId.startsWith('eth_')) {
             const addr = userId.replace('eth_', '');
             displayName = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
             avatarUrl = `https://api.dicebear.com/7.x/identicon/png?size=128&seed=${addr}`;
-            
-            try {
-              await supabase.from('profiles').upsert({
-                user_id: userId,
-                display_name: displayName,
-                avatar_url: avatarUrl,
-                bio: 'Trading via MetaMask on Arc Testnet.'
-              }, { onConflict: 'user_id' });
-            } catch (_) { /* profiles table may not exist yet */ }
+            // Queue upsert (fire-and-forget)
+            supabase.from('profiles').upsert({
+              user_id: userId,
+              display_name: displayName,
+              avatar_url: avatarUrl,
+              bio: 'Trading via MetaMask on Arc Testnet.'
+            }, { onConflict: 'user_id' }).then(() => {}).catch(() => {});
           }
         } catch (_) { /* profiles table may not exist yet */ }
         
