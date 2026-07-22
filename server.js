@@ -1198,6 +1198,11 @@ async function ensureWalletSet() {
 
 const walletAddressCache = new Map();
 
+// Balance cache: { address -> { balance, ts } } — avoids hitting the RPC
+// on every /api/agents/roster call (which fetches 6+ wallets).
+const _balanceCache = new Map();
+const BALANCE_CACHE_TTL_MS = 15_000; // 15s — fresh enough for UI
+
 async function getWalletInfo(walletId) {
   try {
     let address = walletAddressCache.get(walletId);
@@ -1207,8 +1212,15 @@ async function getWalletInfo(walletId) {
       walletAddressCache.set(walletId, address);
     }
 
+    // Check balance cache first — avoids RPC calls on every roster fetch
+    const cached = _balanceCache.get(address);
+    if (cached && Date.now() - cached.ts < BALANCE_CACHE_TTL_MS) {
+      return { walletId, address, usdcBalance: cached.balance, exactUsdcBalance: cached.exact };
+    }
+
     let balance = '0.00';
     let exactBalance = '0';
+    let gotBalance = false;
     try {
       const balanceRaw = await publicClient.readContract({
         address: USDC,
@@ -1285,6 +1297,8 @@ async function getWalletInfo(walletId) {
       }
     }
 
+    // Cache the result
+    _balanceCache.set(address, { balance, exact: exactBalance, ts: Date.now() });
     return { walletId, address, usdcBalance: balance, exactUsdcBalance: exactBalance };
   } catch (e) {
     console.error('getWalletInfo error:', e.message);
