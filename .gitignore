@@ -5,6 +5,11 @@ wallets.json
 trades.json
 approved.json
 
+# Social media / marketing campaign docs — local only, not for repo
+docs/twitter-content-calendar.md
+docs/twitter-reply-templates.md
+docs/ceo-twitter-content.md
+
 # Local data/log files — never commit these (they may contain user data)
 heroku_logs.txt
 pnl_data.json
