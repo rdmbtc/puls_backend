@@ -145,31 +145,37 @@ class _WebLandingPageState extends State<WebLandingPage>
               ),
             ),
             // ── Content ───────────────────────────────────────────────────
+            // CustomScrollView with SliverList for lazy section building —
+            // only visible + near-visible sections are built, so scrolling
+            // is buttery smooth even with 13 heavy sections. The old
+            // SingleChildScrollView+Column built ALL sections eagerly.
             SmoothScrollWeb(
               controller: _scrollCtrl,
               config: SmoothScrollConfig.lenis(
                 scrollSpeed: 1.1,
                 damping: 0.09,
               ),
-              child: SingleChildScrollView(
+              child: CustomScrollView(
                 controller: _scrollCtrl,
-                child: Column(
-                  children: [
-                    RepaintBoundary(child: _HeroSection(scrollOffset: _scrollOffset)),
-                    _Reveal(scrollOffset: _scrollOffset, child: RepaintBoundary(child: const LiveMarketTicker())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: _HowItWorksSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: RepaintBoundary(child: _FeaturesSection(scrollOffset: _scrollOffset))),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: AccountableAiSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: PhoneDemoSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: MeetTheAgentsSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: LiveTractionSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: LiveActivitySection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: _StatsSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: FaqSection())),
-                    _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: _FinalCtaSection())),
-                    const RepaintBoundary(child: _FooterSection()),
-                  ],
-                ),
+                slivers: [
+                  SliverList(
+                    delegate: SliverChildListDelegate([
+                      RepaintBoundary(child: _HeroSection(scrollOffset: _scrollOffset)),
+                      _Reveal(scrollOffset: _scrollOffset, child: RepaintBoundary(child: const LiveMarketTicker())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: _HowItWorksSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: RepaintBoundary(child: _FeaturesSection(scrollOffset: _scrollOffset))),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: AccountableAiSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: PhoneDemoSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: MeetTheAgentsSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: LiveTractionSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: LiveActivitySection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: _StatsSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: FaqSection())),
+                      _Reveal(scrollOffset: _scrollOffset, child: const RepaintBoundary(child: _FinalCtaSection())),
+                      const RepaintBoundary(child: _FooterSection()),
+                    ]),
+                  ),
+                ],
               ),
             ),
             // ── Scroll progress bar (top) ─────────────────────────────────
@@ -1170,7 +1176,7 @@ class _HowItWorksSection extends StatelessWidget {
         Icons.swipe_rounded,
         '3',
         'Swipe to trade',
-        'Swipe right for YES, left for NO on any real-world market. Confirms on-chain in under a second.',
+        'Swipe right for YES, left for NO on any real-world market. Confirms onchain in under a second.',
       ),
     ];
 
@@ -1361,7 +1367,7 @@ class _BentoState extends State<_Bento> {
         featured: true,
         eyebrow: 'AGENTBOND · SKIN IN THE GAME',
         title: 'Every prediction is staked',
-        body: 'Each agent backs its call with a real USDC AgentBond, locked on-chain. '
+        body: 'Each agent backs its call with a real USDC AgentBond, locked onchain. '
             'Wrong call → bond slashed. Right call → returned, reputation rises. '
             'No cheap talk — reputation is capital at risk.',
         visual: _BondViz(),
@@ -1371,7 +1377,7 @@ class _BentoState extends State<_Bento> {
         eyebrow: 'x402 · AGENT-TO-AGENT',
         title: 'Pay-per-read intelligence',
         body: 'Agents buy each other\'s Signals via USDC nanopayments '
-            'before trading — a closed-loop market for on-chain alpha.',
+            'before trading — a closed-loop market for onchain alpha.',
         visual: _PayFlowViz(),
       );
       const bond = _BentoCell(
@@ -1379,14 +1385,14 @@ class _BentoState extends State<_Bento> {
         eyebrow: 'AUTONOMOUS · NO HUMAN IN THE LOOP',
         title: 'Agents that decide, not automate',
         body: 'Pulse researches live sources, reasons with citations, sizes by risk, '
-            'and publishes a HOLD when there is no edge. Genuine agency, on-chain.',
+            'and publishes a HOLD when there is no edge. Genuine agency, onchain.',
         visual: _AgentDecideViz(),
       );
       const signal = _BentoCell(
         accent: Color(0xFF8B5CF6),
         eyebrow: 'CREATOR ECONOMY',
         title: 'Earn per read',
-        body: 'Publish a premium Signal, attested on-chain, unlocked '
+        body: 'Publish a premium Signal, attested onchain, unlocked '
             'per read in USDC.',
         visual: _SignalUnlockViz(),
       );
@@ -1794,7 +1800,7 @@ class _AgentDecideViz extends StatefulWidget {
 class _AgentDecideVizState extends State<_AgentDecideViz>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c;
-  static const _sources = ['Reuters', 'Polymarket', 'On-chain'];
+  static const _sources = ['Reuters', 'Polymarket', 'Onchain'];
 
   @override
   void initState() {
@@ -3170,7 +3176,7 @@ class _FinalCtaSection extends StatelessWidget {
             ),
           ),
           Text(
-            'Verify them on-chain.',
+            'Verify them onchain.',
             textAlign: TextAlign.center,
             style: TextStyle(
               fontFamily: PulsColors.fontDisplay,

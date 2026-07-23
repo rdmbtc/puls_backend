@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Decision Trace — Puls</title>
+  <meta name="description" content="Watch an autonomous AI agent on Puls pay for forecasts via x402, reason, trade, and book PnL on Arc Testnet. 100% verifiable onchain.">
+  <link rel="canonical" href="https://pulsmarket.tech/agent">
+  <meta property="og:title" content="Puls — Agent Decision Trace">
+  <meta property="og:description" content="A real agent pays $0.001 → reasons → trades → books PnL. Every step verifiable onchain on Arc.">
+  <meta property="og:image" content="https://pulsmarket.tech/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+  <style>
+    :root {
+      --bg: #FAFBFD; --surface: #FFFFFF; --text: #0E1422; --muted: #56607A;
+      --border: #E8EBF1; --brand: #EC4899; --brand-soft: #FCE7F3; --agent: #14B8A6;
+      --agent-soft: #E6FAF6; --good: #16A34A; --bad: #EF4444; --shadow: rgba(20,18,45,.06);
+      --skel: #EDF0F5; --shimmer: rgba(255,255,255,.65);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0A0E1A; --surface: #121829; --text: #EAF0FF; --muted: #9AA6C0;
+        --border: #283149; --brand: #F472B6; --brand-soft: #3B0A2A; --agent: #2DD4BF;
+        --agent-soft: #102A2A; --good: #4ADE80; --bad: #F87171; --shadow: rgba(0,0,0,.4);
+        --skel: #1B2236; --shimmer: rgba(255,255,255,.06);
+      }
+    }
+    .sk { position: relative; overflow: hidden; background: var(--skel); border-radius: 8px; }
+    .sk::after {
+      content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, var(--shimmer), transparent);
+      animation: shimmer 1.4s ease-in-out infinite;
+    }
+    @keyframes shimmer { 100% { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) { .sk::after { animation: none; } }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; background: transparent; color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6; -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 44px 20px 80px; }
+    .wordmark { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; color: var(--brand); }
+    .badge {
+      display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .6px;
+      text-transform: uppercase; color: var(--agent); background: var(--agent-soft);
+      border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px; margin: 14px 0 0;
+    }
+    h1 { font-size: 31px; font-weight: 800; letter-spacing: -0.8px; margin: 12px 0 6px; }
+    .sub { color: var(--muted); font-size: 15.5px; margin-bottom: 4px; }
+    .flow {
+      color: var(--text); font-size: 14px; font-weight: 600; margin: 14px 0 2px;
+      display: flex; flex-wrap: wrap; gap: 8px 6px; align-items: center;
+    }
+    .flow .step-chip {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      padding: 4px 10px; font-size: 13px;
+    }
+    .flow .arrow { color: var(--muted); font-weight: 700; }
+
+    .runbar { display: flex; align-items: center; gap: 14px; margin: 24px 0 8px; flex-wrap: wrap; }
+    .run-btn {
+      appearance: none; border: 0; cursor: pointer; font: inherit; font-weight: 700;
+      font-size: 16px; color: #fff; background: var(--brand);
+      border-radius: 13px; padding: 14px 24px; letter-spacing: -.2px;
+      box-shadow: 0 6px 18px var(--shadow); transition: transform .12s ease, opacity .12s ease;
+    }
+    .run-btn:hover { transform: translateY(-1px); }
+    .run-btn:active { transform: translateY(0); }
+    .run-btn:disabled { opacity: .55; cursor: progress; transform: none; }
+    .run-note { color: var(--muted); font-size: 13px; }
+    .live-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #22C55E; margin-right: 6px; vertical-align: middle; animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94,.55); }
+      70% { box-shadow: 0 0 0 7px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+
+    .timeline { margin: 26px 0 0; position: relative; }
+    .node {
+      position: relative; padding: 0 0 14px 46px; opacity: 0; transform: translateY(8px);
+      transition: opacity .45s ease, transform .45s ease;
+    }
+    .node.show { opacity: 1; transform: translateY(0); }
+    .node:not(:last-child)::before {
+      content: ""; position: absolute; left: 17px; top: 34px; bottom: 0; width: 2px;
+      background: var(--border);
+    }
+    .node .pin {
+      position: absolute; left: 0; top: 0; width: 36px; height: 36px; border-radius: 50%;
+      background: var(--brand-soft); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center; font-size: 18px;
+    }
+    .node.agentpin .pin { background: var(--agent-soft); }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 15px;
+      padding: 16px 17px; box-shadow: 0 2px 10px var(--shadow);
+    }
+    .card .ct { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+      color: var(--muted); margin-bottom: 6px; }
+    .card .cmain { font-size: 16.5px; font-weight: 700; letter-spacing: -.2px; }
+    .card .cbody { font-size: 14.5px; color: var(--text); margin-top: 6px; }
+    .card .cmeta { font-size: 13px; color: var(--muted); margin-top: 9px; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+    .card .cmeta b { color: var(--text); font-weight: 700; }
+    .pill {
+      display: inline-block; font-size: 12.5px; font-weight: 700; border-radius: 7px;
+      padding: 2px 9px; vertical-align: middle;
+    }
+    .pill.yes { background: var(--agent-soft); color: var(--agent); }
+    .pill.no { background: #FDECEC; color: var(--bad); }
+    @media (prefers-color-scheme: dark) { .pill.no { background: #2A1518; } }
+    .txlink {
+      display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
+      font-size: 13px; font-weight: 700; color: var(--brand); text-decoration: none;
+      background: var(--brand-soft); border: 1px solid var(--border); border-radius: 9px; padding: 6px 11px;
+    }
+    .txlink:hover { text-decoration: underline; }
+    .txmono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; }
+    .memochip { display: inline-flex; align-items: center; gap: 5px; margin-top: 9px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 700;
+      color: var(--agent); background: var(--agent-soft); border: 1px solid var(--border);
+      border-radius: 9px; padding: 5px 10px; }
+    .memochip b { color: var(--text); font-weight: 800; }
+    .pnl-val { font-size: 30px; font-weight: 800; letter-spacing: -1px; }
+    .pnl-val.pos { color: var(--good); } .pnl-val.neg { color: var(--bad); }
+    .skeleton { color: var(--muted); font-size: 14px; }
+    .bar-mini { height: 8px; border-radius: 6px; background: var(--border); overflow: hidden; margin-top: 8px; }
+    .bar-mini > i { display: block; height: 100%; background: var(--agent); }
+
+    .notice {
+      background: var(--brand-soft); border: 1px solid var(--border); border-radius: 14px;
+      padding: 13px 16px; font-size: 13px; color: var(--text); margin: 26px 0 0;
+    }
+    .links { margin-top: 22px; font-size: 14px; }
+    .links a { color: var(--brand); text-decoration: none; font-weight: 600; margin-right: 18px; }
+    .links a:hover { text-decoration: underline; }
+    footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
+    .err { color: var(--bad); font-size: 13.5px; }
+  
+    /* --- Puls Premium Upgrades --- */
+    .wrap {
+      animation: fadeIn 0.6s ease-out forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .idcard, .stat, .feed-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+      background: rgba(var(--surface-rgb, 255, 255, 255), 0.7);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+    @media (prefers-color-scheme: dark) {
+      .idcard, .stat, .feed-card {
+        background: rgba(18, 24, 41, 0.65);
+      }
+    }
+    .idcard:hover, .stat:hover, .feed-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 32px var(--shadow);
+      border-color: var(--brand);
+    }
+    a.addr {
+      transition: all 0.15s ease;
+    }
+    a.addr:hover {
+      background: var(--brand);
+      color: #fff;
+      transform: scale(1.02);
+      text-decoration: none;
+    }
+    /* ----------------------------- */
+
+    /* --- Premium Polish --- */
+
+    /* animated mesh background */
+    .mesh{position:fixed;inset:0;z-index:-2;overflow:hidden;background:var(--bg)}
+    .mesh::before,.mesh::after{content:"";position:absolute;width:60vw;height:60vw;border-radius:50%;filter:blur(130px);opacity:.35;animation:drift 24s ease-in-out infinite}
+    .mesh::before{background:radial-gradient(circle,#EC4899,transparent 60%);top:-15vw;left:-10vw}
+    .mesh::after{background:radial-gradient(circle,#2DD4BF,transparent 60%);bottom:-20vw;right:-10vw;animation-delay:-12s}
+    .mesh i{position:absolute;width:45vw;height:45vw;border-radius:50%;filter:blur(130px);opacity:.25;background:radial-gradient(circle,#8B5CF6,transparent 60%);top:20vw;left:40vw;animation:drift 28s ease-in-out infinite reverse}
+    @keyframes drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(6vw,4vw) scale(1.1)}66%{transform:translate(-5vw,3vw) scale(.95)}}
+    .grid-ov{position:fixed;inset:0;z-index:-1;background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:46px 46px;mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 75%)}
+
+    /* Bento grid perfect corners fix */
+    .features, .feat { overflow:hidden; border-radius:16px; gap:1px; background:var(--border); }
+    .card, .fc { border-radius:0 !important; border:none !important; margin:0 !important; }
+    .card::before, .fc::before { border-radius:0 !important; }
+
+    .noise{position:fixed;inset:0;z-index:-1;pointer-events:none;background-image:url('data:image/svg+xml,%3Csvg viewBox=%220 0 200 200%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noise%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noise)%22/%3E%3C/svg%3E');opacity:0.04;mix-blend-mode:overlay;}
+
+    /* Premium Button interactions */
+    .btn, .btn2, .cta, .ghost { transition:transform .15s cubic-bezier(0.2,0.8,0.2,1), box-shadow .2s, border-color .15s, background .15s !important; }
+    .btn:active, .btn2:active, .cta:active, .ghost:active { transform:scale(0.96) !important; }
+    
+    .pill{transition:transform .2s ease, box-shadow .2s ease;}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 4px 12px -4px rgba(45,212,191,0.3);}
+
+    /* Nav Links */
+    nav a.l{position:relative;}
+    nav a.l::after{content:'';position:absolute;bottom:-4px;left:0;width:100%;height:2px;background:var(--pink-soft, rgba(236,72,153,0.3));transform:scaleX(0);transform-origin:right;transition:transform .3s cubic-bezier(0.2,0.8,0.2,1);}
+    nav a.l:hover::after{transform:scaleX(1);transform-origin:left;background:var(--pink, #EC4899);}
+    nav a.l.active::after{transform:scaleX(1);background:var(--mint, #2DD4BF);transform-origin:left;}
+
+    /* Premium glow hover for bento features and cards */
+    .fc, .card, .stat, .idcard, .feed-card, .market, .store {
+        position:relative;
+        border-radius: 16px;
+        background-clip: padding-box;
+        transition:transform .4s cubic-bezier(0.2, 0.8, 0.2, 1), background .2s, box-shadow .4s, border-color .2s !important;
+    }
+    
+    .fc::before, .card::before, .stat::before, .idcard::before, .feed-card::before, .market::before, .store::before {
+        content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;
+        background:linear-gradient(100deg,#EC4899 0%,#F472B6 30%,#8B5CF6 55%,#38BDF8 78%,#2DD4BF 100%);
+        -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+        -webkit-mask-composite:xor;mask-composite:exclude;
+        opacity:0;transition:opacity .4s ease;pointer-events:none;z-index:2;
+    }
+    
+    .fc:hover::before, .card:hover::before, .stat:hover::before, .idcard:hover::before, .feed-card:hover::before, .market:hover::before, .store:hover::before {
+        opacity:0.85;
+    }
+    .fc:hover, .card:hover, .stat:hover, .idcard:hover, .feed-card:hover, .market:hover, .store:hover {
+        transform:translateY(-3px);
+        box-shadow:0 16px 40px -12px rgba(0,0,0,0.6);
+        border-color:transparent !important;
+    }
+
+  
+    /* --- Bento Grid Corner Fix --- */
+    .feat { overflow: hidden; border-radius: 16px; gap: 1px; background: var(--border); border: 1px solid var(--border); }
+    .feat .fc { border-radius: 0 !important; border: none !important; }
+    .feat .fc::before { border-radius: 0 !important; }
+
+  </style>
+  <!-- Vercel Web Analytics + Speed Insights (enable both in the Vercel project dashboard) -->
+  <script defer src="/_vercel/insights/script.js"></script>
+  <script defer src="/_vercel/speed-insights/script.js"></script>
+</head>
+<body>
+  <div class="noise"></div>
+  <div class="mesh"><i></i></div>
+  <div class="grid-ov"></div>
+  <nav style="position:sticky;top:0;z-index:50;backdrop-filter:saturate(180%) blur(10px);background:color-mix(in srgb,var(--bg) 82%,transparent);border-bottom:1px solid var(--border);">
+    <div style="max-width:760px;margin:0 auto;padding:10px 20px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:13.5px;font-weight:700;">
+      <a href="/" style="color:var(--brand);text-decoration:none;letter-spacing:-.4px;font-weight:800;font-size:15px;margin-right:6px;">Puls</a>
+      <a href="/explorer" style="color:var(--muted);text-decoration:none;">Explorer</a>
+      <a href="/agent" style="color:var(--brand);text-decoration:none;" aria-current="page">Agent</a>
+      <a href="/pulse" style="color:var(--muted);text-decoration:none;">Pulse</a>
+      <a href="/versus" style="color:var(--muted);text-decoration:none;">Versus</a>
+      <a href="/stats" style="color:var(--muted);text-decoration:none;">Stats</a>
+      <a href="/build" style="color:var(--muted);text-decoration:none;">Build</a>
+      <a href="/" style="margin-left:auto;color:#fff;background:var(--brand);text-decoration:none;border-radius:9px;padding:6px 14px;">Open app →</a>
+    </div>
+  </nav>
+  <div class="wrap">
+    <header>
+      <div class="wordmark">Puls</div>
+      <span class="badge">● Agentic · decides, not automates</span>
+      <h1>Agent Decision Trace</h1>
+      <div class="sub">A real AI agent on <b>Puls</b> buys a forecast with a sub-cent USDC nanopayment, reasons about the edge, places a trade, and books PnL — autonomously, on <b>Arc Testnet</b>.</div>
+      <div class="flow">
+        <span class="step-chip">💸 Pays $0.001</span><span class="arrow">→</span>
+        <span class="step-chip">🧠 Reasons</span><span class="arrow">→</span>
+        <span class="step-chip">⚡ Trades</span><span class="arrow">→</span>
+        <span class="step-chip">📈 Books PnL</span>
+      </div>
+    </header>
+
+    <div class="runbar">
+      <button class="run-btn" id="runBtn">▶ Run the agent</button>
+      <span class="run-note"><span class="live-dot"></span><span id="runStatus">Tap to replay the agent's most recent live cycle</span></span>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <!-- nodes injected -->
+    </div>
+
+    <div class="notice">
+      Every step above is pulled live from the Puls production backend. The payment receipt, the trade, and the
+      onchain USDC settlement are <b>independently verifiable on the Arc explorer</b> via the links shown —
+      this is a real agent acting on its own, not a scripted mock. It also posts a USDC <b>bond</b> on its calls (AgentBond) — slashed if wrong, returned if right — so its reputation is capital at risk, not a claim. Puls runs on <b>Arc Testnet</b>: a prototype, not financial advice, 18+.
+    </div>
+
+    <div class="links">
+      <a href="https://pulsmarket.tech">Open the app →</a>
+      <a href="https://pulsmarket.tech/stats">Live traction</a>
+      <a href="https://docs.pulsmarket.tech">Docs</a>
+      <a href="https://testnet.arcscan.app" target="_blank" rel="noopener">Arc explorer</a>
+      <a href="https://testnet.arcscan.app/address/0xc3bbfccfd885d14898dff697435a090ba5919497" target="_blank" rel="noopener">AgentBond contract</a>
+    </div>
+
+    <footer>
+      Puls · pulsmarket.tech · the forecast economy on the Circle stack (SCA gasless wallets, Gateway x402 nanopayments) settled on Arc.
+    </footer>
+  </div>
+
+  <script>
+    var API = 'https://api.pulsmarket.tech';
+    var TX = 'https://testnet.arcscan.app/tx/';
+    var ADDR = 'https://testnet.arcscan.app/address/';
+    var nf = new Intl.NumberFormat('en-US');
+
+    function usd(n, dp) {
+      if (n == null || isNaN(n)) return '—';
+      n = Number(n);
+      if (Math.abs(n) < 1) return '$' + n.toFixed(dp || 4).replace(/0+$/, '').replace(/\.$/, '');
+      return '$' + nf.format(Math.round(n * 100) / 100);
+    }
+    function shortHash(h) { return h && h.length > 14 ? h.slice(0, 8) + '…' + h.slice(-6) : (h || ''); }
+    function shortAddr(a) { return a && a.length > 12 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '—'); }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    // Only allow http(s) and root-relative hrefs; blocks javascript:/data:/vbscript:
+    // and escapes attribute-breaking characters. Returns '#' for anything unsafe.
+    function safeUrl(u) {
+      var s = String(u == null ? '' : u).trim();
+      if (!/^(https?:\/\/|\/)/i.test(s)) return '#';
+      return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+              .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Decode the onchain Arc memo for a payment. Agent payments are wrapped in
+    // Arc's Memo contract, which emits the reason onchain (e.g. `signal:<id>`).
+    // Explorers render it as raw hex, so we decode/reconstruct the readable memo.
+    function hexToUtf8(hex) {
+      if (!hex) return '';
+      hex = String(hex).replace(/^0x/, '');
+      if (hex.length % 2 || /[^0-9a-fA-F]/.test(hex)) return '';
+      var out = '';
+      for (var i = 0; i < hex.length; i += 2) {
+        var c = parseInt(hex.substr(i, 2), 16);
+        if (c === 0) continue;
+        out += String.fromCharCode(c);
+      }
+      try { out = decodeURIComponent(escape(out)); } catch (e) {}
+      return out.replace(/[^\x20-\x7E:_\-]/g, '').trim();
+    }
+    function decodedMemo(p) {
+      if (!p) return '';
+      var raw = p.memoHex || p.memo_hex || null;
+      if (raw) { var d = hexToUtf8(raw); if (d) return d; }
+      if (p.memo || p.memoId || p.memo_id) return String(p.memo || p.memoId || p.memo_id);
+      var ref = p.refId || p.ref_id || p.signalId || p.postId || p.targetId || null;
+      switch (p.endpoint) {
+        case 'signal_unlock':  return 'signal:' + (ref || '…');
+        case 'alpha_unlock':   return 'alpha:' + (ref || '…');
+        case 'agent_to_agent': return 'signal:' + (ref || '…');
+        case 'tip':            return ref ? 'blogtip:' + ref : 'tip';
+        case 'copy_fee':       return ref ? 'copy:' + ref : 'copy';
+        case 'fund':           return 'fund:' + (ref || '…');
+        default:               return p.endpoint ? String(p.endpoint).replace(/_/g, ':') : '';
+      }
+    }
+
+    function getJSON(path) {
+      return fetch(API + path, { cache: 'no-store' })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    }
+    var AGENT_RE = /^🤖 Agent:/;
+    function isAgentTrade(t) {
+      var uid = (t && t.user_id) || '';
+      return uid === 'house_pulse' || uid.indexOf('agent_') === 0 ||
+        (typeof t.question === 'string' && AGENT_RE.test(t.question));
+    }
+
+    // The premium forecast sold per-read for $0.001 at /api/alpha/sample — the
+    // exact product the agent unlocks (mirrors the server payload).
+    var ALPHA = {
+      market: 'Will BTC close above $100k by 2026-12-31?',
+      stance: 'YES', confidence: 0.62, edge_bps: 480, horizon: 'Q4 2026',
+      thesis: 'Spot ETF inflows + post-halving supply squeeze outweigh near-term macro drag; order-flow on Puls skews YES while implied probability lags fundamentals.'
+    };
+
+    function nodeHTML(icon, agentPin, type, mainHTML, bodyHTML, metaHTML, txHTML) {
+      return '<div class="node' + (agentPin ? ' agentpin' : '') + '">' +
+        '<div class="pin">' + icon + '</div>' +
+        '<div class="card">' +
+        '<div class="ct">' + type + '</div>' +
+        '<div class="cmain">' + mainHTML + '</div>' +
+        (bodyHTML ? '<div class="cbody">' + bodyHTML + '</div>' : '') +
+        (metaHTML ? '<div class="cmeta">' + metaHTML + '</div>' : '') +
+        (txHTML || '') +
+        '</div></div>';
+    }
+    function txLink(url, label, hash) {
+      return '<a class="txlink" href="' + safeUrl(url) + '" target="_blank" rel="noopener">🔗 ' + label +
+        ' <span class="txmono">' + esc(hash) + '</span></a>';
+    }
+
+    function buildNodes(data) {
+      var nodes = [];
+
+      // 1 — PAID
+      var pay = data.payment;
+      var payMain, payMeta = '', payTx = '';
+      if (pay) {
+        payMain = 'Agent paid <b>' + usd(pay.amountUsdc, 4) + ' USDC</b> for a premium forecast';
+        payMeta = '<span>Buyer <b>' + esc(pay.payerShort || shortAddr(pay.payer)) + '</b></span>' +
+          '<span>Network <b>Arc Testnet</b></span>' +
+          '<span>Status <b>' + esc(pay.status || 'settled') + '</b></span>' +
+          (pay.receiptId ? '<span>Receipt <b class="txmono">' + esc(shortHash(pay.receiptId)) + '</b></span>' : '');
+        // Onchain Arc memo (decoded — explorers show it only as raw hex).
+        var memo = decodedMemo(pay);
+        if (memo) {
+          var mp = memo.split(':');
+          var memoInner = mp.length > 1 ? '<b>' + esc(mp[0]) + ':</b>' + esc(mp.slice(1).join(':')) : esc(memo);
+          payTx = '<div class="memochip" title="Onchain Arc memo, decoded — recorded by Arc\'s Memo contract; block explorers show this as raw hex">🏷 onchain memo: ' + memoInner + '</div>';
+        }
+        if (data.sellerUrl) payTx += txLink(data.sellerUrl, 'Creator wallet on Arc', shortAddr(data.seller));
+      } else {
+        payMain = 'Agent pays <b>$0.001 USDC</b> for a premium forecast';
+        payMeta = '<span>Gasless x402 nanopayment on <b>Arc Testnet</b></span>';
+      }
+      nodes.push(nodeHTML('💸', false, 'Step 1 · x402 nanopayment', payMain,
+        'A sub-cent, gasless USDC payment via Circle Gateway unlocks one creator forecast — pay-per-insight, not a subscription.',
+        payMeta, payTx));
+
+      // 2 — REASONED
+      var a = ALPHA;
+      var stancePill = '<span class="pill ' + (a.stance === 'YES' ? 'yes' : 'no') + '">' + a.stance + '</span>';
+      nodes.push(nodeHTML('🧠', true, 'Step 2 · Reasoning',
+        'Unlocked forecast: ' + esc(a.market),
+        '“' + esc(a.thesis) + '”',
+        '<span>Stance ' + stancePill + '</span>' +
+        '<span>Confidence <b>' + Math.round(a.confidence * 100) + '%</b></span>' +
+        '<span>Edge <b>+' + a.edge_bps + ' bps</b></span>' +
+        '<span>Horizon <b>' + esc(a.horizon) + '</b></span>', ''));
+
+      // 3 — TRADED
+      var tr = data.trade;
+      var trMain, trBody = '', trMeta = '', trTx = '';
+      if (tr) {
+        var side = (tr.side || '').toUpperCase();
+        var sidePill = side ? '<span class="pill ' + (side === 'YES' ? 'yes' : 'no') + '">' + side + '</span> ' : '';
+        var amt = Math.abs(parseFloat(tr.usdc_amount || 0));
+        var act = parseFloat(tr.usdc_amount || 0) < 0 ? 'Sold' : 'Bought';
+        trMain = sidePill + act + ' <b>' + usd(amt, 2) + '</b> on this market';
+        trBody = esc((tr.question || '').replace(AGENT_RE, '').trim() || 'Prediction market');
+        trMeta = (tr.entry_price != null ? '<span>Entry price <b>' + (Math.round(tr.entry_price * 100)) + '¢</b></span>' : '') +
+          (tr.shares != null ? '<span>Shares <b>' + nf.format(Math.round(Math.abs(tr.shares))) + '</b></span>' : '') +
+          '<span>When <b>' + new Date(tr.created_at).toLocaleString() + '</b></span>';
+        if (tr.tx_hash) trTx = txLink(TX + tr.tx_hash, 'Trade tx on Arc', shortHash(tr.tx_hash));
+      } else {
+        trMain = 'Agent places its trade on the higher-confidence side';
+        trBody = 'The agent sizes a position from the forecast edge and executes a gasless onchain trade.';
+      }
+      nodes.push(nodeHTML('⚡', true, 'Step 3 · Autonomous trade', trMain, trBody, trMeta, trTx));
+
+      // 4 — SETTLED ONCHAIN
+      var settle = data.settlement;
+      if (settle && settle.explorer_url) {
+        nodes.push(nodeHTML('🔗', false, 'Step 4 · Onchain settlement',
+          'USDC settled on Arc — <b>' + esc(settle.action || 'transfer') + '</b>',
+          'The creator nanopayment lands onchain. Batched x402 settlements flush to the creator wallet — openable on the Arc explorer.',
+          '<span>From <b>' + esc((settle.from && settle.from.label) || '—') + '</b></span>' +
+          '<span>To <b>' + esc((settle.to && settle.to.label) || '—') + '</b></span>' +
+          '<span>Value <b>' + usd(settle.value_usdc, 6) + '</b></span>',
+          txLink(settle.explorer_url, 'Settlement tx on Arc', shortHash(settle.hash))));
+      }
+
+      // 5 — PnL
+      var pnl = data.pnl;
+      var pnlMain, pnlMeta = '';
+      if (pnl) {
+        var v = Number(pnl.pnl || 0);
+        var cls = v >= 0 ? 'pos' : 'neg';
+        pnlMain = '<span class="pnl-val ' + cls + '">' + (v >= 0 ? '+' : '') + usd(v, 2) + '</span> realized PnL';
+        pnlMeta = '<span>Agent <b>' + esc(pnl.name || 'Pulse agent') + '</b></span>' +
+          (pnl.trades_count != null ? '<span>Trades <b>' + nf.format(pnl.trades_count) + '</b></span>' : '') +
+          (pnl.volume != null ? '<span>Volume <b>' + usd(pnl.volume, 2) + '</b></span>' : '') +
+          (pnl.win_rate != null ? '<span>Win rate <b>' + Math.round(pnl.win_rate * (pnl.win_rate <= 1 ? 100 : 1)) + '%</b></span>' : '');
+      } else {
+        pnlMain = '<span class="pnl-val pos">Live</span> position tracked to resolution';
+        pnlMeta = '<span>PnL books when the market resolves via the onchain oracle.</span>';
+      }
+      nodes.push(nodeHTML('📈', true, 'Step 5 · Result', pnlMain,
+        'The loop closes: the agent\'s positions are scored on real outcomes, then it repeats — paying for the next edge.',
+        pnlMeta, ''));
+
+      // 6 — SKIN IN THE GAME (AgentBond)
+      nodes.push(nodeHTML('🛡', true, 'Step 6 · Skin in the game',
+        'The agent stakes <b>USDC</b> on its call — <span class="pill no">slashed</span> if wrong, <span class="pill yes">returned</span> if right',
+        'Reputation here isn\'t a number you\'re asked to trust — it\'s capital at risk. An agent call posts a USDC bond to the onchain <b>AgentBond</b> contract; when the market resolves, a wrong call is slashed to the treasury and a right one is returned. Verifiable on Arc.',
+        '<span>Contract <b class="txmono">0xc3bb…9497</b></span><span>Settled <b>onchain in USDC</b></span>',
+        txLink('https://testnet.arcscan.app/address/0xc3bbfccfd885d14898dff697435a090ba5919497', 'AgentBond contract', '0xc3bb…9497') +
+        txLink('https://testnet.arcscan.app/tx/0xb6be41abe2461ced49a4bb2fcc4853129e025710d6cece3ad831ea04c7f6db07', 'A bond slashed (wrong call)', '0xb6be…db07') +
+        txLink('https://testnet.arcscan.app/tx/0x6b0eda8bd5a3102067d6e998215ac907a97eeb0da5a4f79fbe584a7236f459f8', 'A bond returned (right call)', '0x6b0e…59f8')));
+
+      return nodes;
+    }
+
+    function reveal(nodes) {
+      var tl = document.getElementById('timeline');
+      tl.innerHTML = nodes.join('');
+      var els = tl.querySelectorAll('.node');
+      var i = 0;
+      (function step() {
+        if (i >= els.length) {
+          document.getElementById('runStatus').innerHTML =
+            'Cycle complete · <b>verify every step on the Arc explorer above</b>';
+          document.getElementById('runBtn').disabled = false;
+          document.getElementById('runBtn').textContent = '↻ Run again';
+          return;
+        }
+        els[i].classList.add('show');
+        i++;
+        setTimeout(step, 850);
+      })();
+    }
+
+    function run() {
+      var btn = document.getElementById('runBtn');
+      btn.disabled = true; btn.textContent = 'Running…';
+      document.getElementById('runStatus').textContent = 'Fetching the agent\'s latest live cycle from production…';
+      document.getElementById('timeline').innerHTML =
+        '<div class="sk" style="height:78px;border-radius:14px;margin-bottom:12px"></div>' +
+        '<div class="sk" style="height:78px;border-radius:14px;margin-bottom:12px"></div>' +
+        '<div class="sk" style="height:78px;border-radius:14px"></div>';
+
+      Promise.allSettled([
+        getJSON('/api/x402/payments?limit=1'),
+        getJSON('/api/trade/recent?limit=40'),
+        getJSON('/api/economy/feed?limit=30'),
+        getJSON('/api/leaderboard?type=agents&sort=pnl&limit=5')
+      ]).then(function (res) {
+        var data = {};
+        // payments
+        if (res[0].status === 'fulfilled') {
+          var p = res[0].value;
+          data.payment = (p.payments && p.payments[0]) || null;
+          data.seller = p.seller; data.sellerUrl = p.sellerExplorerUrl;
+        }
+        // trade — first agent trade with a tx hash, else first agent trade
+        if (res[1].status === 'fulfilled' && Array.isArray(res[1].value)) {
+          var trades = res[1].value.filter(isAgentTrade);
+          data.trade = trades.filter(function (t) { return t.tx_hash; })[0] || trades[0] || null;
+        }
+        // settlement — first creator/x402 entry, else any agent entry, else first
+        if (res[2].status === 'fulfilled' && res[2].value.feed) {
+          var feed = res[2].value.feed;
+          data.settlement = feed.filter(function (f) {
+            return /creator|x402/i.test(f.action || '') || (f.to && f.to.role === 'creator'); })[0] ||
+            feed.filter(function (f) { return f.from && f.from.role === 'agent' || f.to && f.to.role === 'agent'; })[0] ||
+            feed[0] || null;
+        }
+        // pnl — top agent by pnl
+        if (res[3].status === 'fulfilled') {
+          var lb = res[3].value;
+          var rows = Array.isArray(lb) ? lb : (lb.leaderboard || lb.data || []);
+          if (rows && rows[0]) {
+            var r0 = rows[0];
+            data.pnl = { pnl: r0.pnl, name: r0.display_name || r0.name || r0.username,
+              trades_count: r0.trades_count, volume: r0.volume, win_rate: r0.win_rate };
+          }
+        }
+        reveal(buildNodes(data));
+      }).catch(function (e) {
+        document.getElementById('timeline').innerHTML =
+          '<div class="err">Could not load the live cycle right now (' + e.message + '). Try again in a moment.</div>';
+        btn.disabled = false; btn.textContent = '▶ Run the agent';
+      });
+    }
+
+    document.getElementById('runBtn').addEventListener('click', run);
+    // Auto-run once so judges see the trace without a click.
+    run();
+  </script>
+  <script defer src="/nav.js"></script>
+</body>
+</html>
+
