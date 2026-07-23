@@ -3137,17 +3137,20 @@ app.get('/api/stats', async (req, res) => {
     // Use a single SQL RPC function that aggregates everything in one query.
     // This replaces the old 22-page sequential pagination that took 15-20s.
     // The RPC runs as a single SELECT on the DB — returns in <500ms.
-    const [rpcRes, marketsRes, resolvedRes, usersRes, payCountRes] = await Promise.all([
+    // Fallback: if the RPC function doesn't exist yet (needs manual creation
+    // in Supabase SQL Editor), fall back to count-only stats (fast, no pagination).
+    const [rpcRes, marketsRes, resolvedRes, usersRes, payCountRes, countRes] = await Promise.all([
       supabase.rpc('get_protocol_stats'),
       supabase.from('deployed_markets').select('*', { count: 'exact', head: true }),
       supabase.from('deployed_markets').select('*', { count: 'exact', head: true }).eq('resolved', true),
       supabase.from('wallets').select('*', { count: 'exact', head: true }),
       supabase.from('x402_payments').select('*', { count: 'exact', head: true }),
+      supabase.from('trades').select('*', { count: 'exact', head: true }).eq('state', 'COMPLETE'),
     ]);
 
-    // Parse RPC result
-    const stats = (rpcRes.data && typeof rpcRes.data === 'object') ? rpcRes.data : {};
-    const tradeCount = Number(stats.trade_count || countRes?.count || 0);
+    // Parse RPC result — if it failed (function not created yet), use count-only fallback
+    const stats = (rpcRes.data && typeof rpcRes.data === 'object' && !rpcRes.error) ? rpcRes.data : {};
+    const tradeCount = Number(stats.trade_count || countRes.count || 0);
     const volumeUsdc = Number(stats.volume_usdc || 0);
     const agentTrades = Number(stats.agent_trades || 0);
     const agentVolumeUsdc = Number(stats.agent_volume || 0);
