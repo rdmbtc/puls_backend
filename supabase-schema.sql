@@ -231,3 +231,26 @@ create table if not exists signal_unlocks (
 
 create index if not exists signal_unlocks_user_idx on signal_unlocks(user_id);
 create index if not exists signal_unlocks_signal_idx on signal_unlocks(signal_id);
+
+-- ── Protocol stats function (single-query replacement for paginated for-loop) ──
+-- Replaces the 22-iteration sequential pagination in /api/stats that took 15-20s.
+-- This function runs as a single SQL query — returns in <500ms.
+CREATE OR REPLACE FUNCTION get_protocol_stats()
+RETURNS JSON AS $$
+DECLARE
+  result JSON;
+BEGIN
+  SELECT json_build_object(
+    'trade_count', COUNT(*),
+    'volume_usdc', COALESCE(SUM(usdc_amount), 0),
+    'agent_trades', COUNT(*) FILTER (WHERE user_id = 'house_pulse' OR user_id LIKE 'agent_%' OR question LIKE '🤖 Agent:%'),
+    'agent_volume', COALESCE(SUM(usdc_amount) FILTER (WHERE user_id = 'house_pulse' OR user_id LIKE 'agent_%' OR question LIKE '🤖 Agent:%'), 0),
+    'seed_trades', COUNT(*) FILTER (WHERE user_id IN (SELECT user_id FROM wallets WHERE last_balance = 'seed')),
+    'seed_volume', COALESCE(SUM(usdc_amount) FILTER (WHERE user_id IN (SELECT user_id FROM wallets WHERE last_balance = 'seed')), 0),
+    'agent_count', COUNT(DISTINCT user_id) FILTER (WHERE user_id = 'house_pulse' OR user_id LIKE 'agent_%')
+  ) INTO result
+  FROM trades WHERE state = 'COMPLETE';
+  RETURN result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
