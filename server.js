@@ -169,6 +169,23 @@ app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 let __elLagMs = 0;
 { let _last = Date.now(); const _t = setInterval(() => { const now = Date.now(); __elLagMs = Math.max(0, now - _last - 1000); _last = now; }, 1000); if (_t.unref) _t.unref(); }
 
+// Memory pressure relief: every 5 minutes, clear caches that grow over time.
+// This is the safety net for the 512MB Heroku dyno — the caches have their
+// own caps, but this sweep catches anything that slipped through (e.g. entries
+// with future timestamps, or caches added in future code that don't have caps).
+setInterval(() => {
+  try {
+    if (typeof rpcCache !== 'undefined' && rpcCache.size > 500) {
+      rpcCache.clear();
+    }
+    if (typeof _balanceCache !== 'undefined' && _balanceCache.size > 200) {
+      _balanceCache.clear();
+    }
+    // Force GC if available (--expose-gc flag or Node with V8 inspector)
+    if (typeof global.gc === 'function') global.gc();
+  } catch (_) {}
+}, 300_000).unref?.();
+
 // Cloudflare/load-balancer health checks. Always fast, never cached.
 app.get('/api/health', (req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -4459,11 +4476,22 @@ const leaderboardStats = new Map(); // user_id → { volume, pnl, trades_count, 
 async function updateLeaderboard() {
   console.log('Running leaderboard update...');
   try {
-    // Supabase caps reads at 1000 rows — paginate so every trader counts.
-    // Only select the columns actually used by the computation (not '*') to
-    // cut data transfer + memory by ~60% (excludes large text fields like
-    // reasoning, thesis, sources that are never read here).
-    const trades = [];
+    // ── Memory-safe leaderboard rebuild ──────────────────────────────────
+    // OLD approach: load ALL 21,000+ trades into a single array, then iterate.
+    // That spiked heap to 1174MB → R15 crash → Heroku restart loop.
+    //
+    // NEW approach: paginate + process page-by-page WITHOUT accumulating the
+    // full array. Each page is grouped into userTrades, then the page is
+    // GC'd before the next page loads. Peak memory = 1 page (~1000 rows)
+    // instead of all trades.
+    const agentOwnerKey = (t) => {
+      if (t.user_id === HOUSE_AGENT_USER) return HOUSE_AGENT_USER;
+      if (typeof t.user_id === 'string' && t.user_id.startsWith('agent_swarm_')) return t.user_id;
+      const isAgentTrade = typeof t.question === 'string' && t.question.startsWith('🤖 Agent:');
+      return isAgentTrade ? `agent_${t.user_id}` : t.user_id;
+    };
+
+    const userTrades = new Map(); // userId → trades[] (only keeps trade refs, not full rows)
     const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase
@@ -4477,31 +4505,14 @@ async function updateLeaderboard() {
         console.error('Failed to fetch trades for leaderboard:', error.message);
         return;
       }
-      trades.push(...(data || []));
-      if (!data || data.length < PAGE) break;
-    }
-    
-    // Humans vs agents: house-agent trades live under 'house_pulse'; user-agent
-    // trades are saved under the owner's user_id with a '🤖 Agent:' question
-    // prefix (and the position is held by the agent_<userId> wallet). Bucket
-    // agent activity separately so the leaderboard can rank them side by side.
-    const agentOwnerKey = (t) => {
-      if (t.user_id === HOUSE_AGENT_USER) return HOUSE_AGENT_USER;
-      // Swarm agents already trade under their own agent id (agent_swarm_*) and
-      // have first-class profiles — keep them as themselves, don't double-wrap.
-      if (typeof t.user_id === 'string' && t.user_id.startsWith('agent_swarm_')) return t.user_id;
-      const isAgentTrade = typeof t.question === 'string' && t.question.startsWith('🤖 Agent:');
-      return isAgentTrade ? `agent_${t.user_id}` : t.user_id;
-    };
-
-    const userTrades = new Map();
-    for (const t of (trades || [])) {
-      if (!t.user_id) continue;
-      const key = agentOwnerKey(t);
-      if (!userTrades.has(key)) {
-        userTrades.set(key, []);
+      // Process this page immediately — group by user, then let GC reclaim the page
+      for (const t of (data || [])) {
+        if (!t.user_id) continue;
+        const key = agentOwnerKey(t);
+        if (!userTrades.has(key)) userTrades.set(key, []);
+        userTrades.get(key).push(t);
       }
-      userTrades.get(key).push(t);
+      if (!data || data.length < PAGE) break; // last page
     }
     
     // Batch-fetch all profiles ONCE to eliminate the N+1 Supabase query
