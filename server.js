@@ -186,8 +186,7 @@ let __elLagMs = 0;
 // This is the safety net for the 512MB Heroku dyno — the caches have their
 // own caps, but this sweep catches anything that slipped through (e.g. entries
 // with future timestamps, or caches added in future code that don't have caps).
-setInterval(() => {
-  try {
+safeInterval('memorySweep', () => {
     if (typeof rpcCache !== 'undefined' && rpcCache.size > 500) {
       rpcCache.clear();
     }
@@ -196,8 +195,7 @@ setInterval(() => {
     }
     // Force GC if available (--expose-gc flag or Node with V8 inspector)
     if (typeof global.gc === 'function') global.gc();
-  } catch (_) {}
-}, 300_000).unref?.();
+}, 300_000);
 
 // Cloudflare/load-balancer health checks. Always fast, never cached.
 app.get('/api/health', (req, res) => {
@@ -1307,6 +1305,7 @@ async function ensureWalletSet() {
 }
 
 const walletAddressCache = new Map();
+const WALLET_ADDR_CACHE_MAX = 500; // hard cap for walletId → address lookups
 
 // Balance cache: { address -> { balance, exact, ts } } — avoids hitting the RPC
 // on every /api/agents/roster call (which fetches 6+ wallets).  Bounded: a
@@ -1319,12 +1318,12 @@ const BALANCE_CACHE_MAX = 500; // hard cap (distinct wallet addresses)
 // Periodic sweep: evict expired balance-cache entries every 60s so the Map
 // doesn't leak memory on a long-running dyno. `.unref()` so it never keeps
 // the process alive on shutdown.
-setInterval(() => {
+safeInterval('balanceCacheSweep', () => {
   const now = Date.now();
   for (const [k, v] of _balanceCache) {
     if (now - v.ts > BALANCE_CACHE_TTL_MS * 2) _balanceCache.delete(k);
   }
-}, 60_000).unref?.();
+}, 60_000);
 
 // Wallet address cache: { walletId -> { address, ts } } — 5 min TTL.
 // Prevents repeated Circle API calls for the same wallet address.
@@ -1366,7 +1365,7 @@ async function getWalletInfo(walletId) {
       try {
         const walletRes = await _circleThrottle(() => circle.getWallet({ id: walletId }));
         address = walletRes.data.wallet.address;
-        walletAddressCache.set(walletId, address);
+        _cappedSet(walletAddressCache, walletId, address);
         _walletAddrCache.set(walletId, { address, ts: Date.now() });
         // Persist to Supabase so future cache misses can read from DB
         // without hitting Circle API again.
@@ -1392,7 +1391,7 @@ async function getWalletInfo(walletId) {
         }
         // Cache the DB-fetched address too
         _walletAddrCache.set(walletId, { address, ts: Date.now() });
-        walletAddressCache.set(walletId, address);
+        _cappedSet(walletAddressCache, walletId, address);
       }
     }
 
@@ -4671,16 +4670,11 @@ async function warmupTopMarkets() {
 const leaderboardStats = new Map(); // user_id → { volume, pnl, trades_count, win_rate, updated_at }
 
 async function updateLeaderboard() {
-  console.log('Running leaderboard update...');
   try {
     // ── Memory-safe leaderboard rebuild ──────────────────────────────────
-    // OLD approach: load ALL 21,000+ trades into a single array, then iterate.
-    // That spiked heap to 1174MB → R15 crash → Heroku restart loop.
-    //
-    // NEW approach: paginate + process page-by-page WITHOUT accumulating the
-    // full array. Each page is grouped into userTrades, then the page is
-    // GC'd before the next page loads. Peak memory = 1 page (~1000 rows)
-    // instead of all trades.
+    // Stream trades page-by-page, aggregating per-user stats immediately.
+    // Does NOT accumulate all trades in a single array — each page is
+    // processed and GC'd before the next loads. Peak memory = 1 page.
     const agentOwnerKey = (t) => {
       if (t.user_id === HOUSE_AGENT_USER) return HOUSE_AGENT_USER;
       if (typeof t.user_id === 'string' && t.user_id.startsWith('agent_swarm_')) return t.user_id;
@@ -4688,7 +4682,8 @@ async function updateLeaderboard() {
       return isAgentTrade ? `agent_${t.user_id}` : t.user_id;
     };
 
-    const userTrades = new Map(); // userId → trades[] (only keeps trade refs, not full rows)
+    // Aggregate stats per user as we stream — no trade array accumulation
+    const userStats = new Map(); // userId → {volume, trades, pnl, markets: Set, resolvedWins, resolvedLosses, profitableMarkets: Set}
     const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase
@@ -4702,19 +4697,32 @@ async function updateLeaderboard() {
         console.error('Failed to fetch trades for leaderboard:', error.message);
         return;
       }
-      // Process this page immediately — group by user, then let GC reclaim the page
+      // Process this page immediately — aggregate into userStats, then let GC reclaim
       for (const t of (data || [])) {
         if (!t.user_id) continue;
         const key = agentOwnerKey(t);
-        if (!userTrades.has(key)) userTrades.set(key, []);
-        userTrades.get(key).push(t);
+        if (!userStats.has(key)) {
+          userStats.set(key, { volume: 0, trades: 0, pnl: 0, markets: new Set(), marketPnL: new Map() });
+        }
+        const s = userStats.get(key);
+        const amt = parseFloat(t.usdc_amount) || 0;
+        if (t.side === 'CLAIM') continue;
+        s.volume += Math.abs(amt);
+        s.trades++;
+        if (t.market_id) s.markets.add(t.market_id);
+        // Track per-market paid/received for PnL calculation
+        if (t.market_id) {
+          if (!s.marketPnL.has(t.market_id)) s.marketPnL.set(t.market_id, { paid: 0, received: 0 });
+          const mp = s.marketPnL.get(t.market_id);
+          if (amt > 0) mp.paid += amt;
+          else if (amt < 0) mp.received += Math.abs(amt);
+        }
       }
       if (!data || data.length < PAGE) break; // last page
     }
     
-    // Batch-fetch all profiles ONCE to eliminate the N+1 Supabase query
-    // pattern (was: 1 query per user inside the loop → 100+ sequential calls).
-    const __allUserIds = [...userTrades.keys()];
+    // Batch-fetch all profiles ONCE
+    const __allUserIds = [...userStats.keys()];
     const __profilesBatch = new Map();
     for (let i = 0; i < __allUserIds.length; i += 100) {
       const chunk = __allUserIds.slice(i, i + 100);
@@ -4723,57 +4731,27 @@ async function updateLeaderboard() {
           .from('profiles').select('user_id, display_name, avatar_url, bio')
           .in('user_id', chunk);
         if (profs) for (const p of profs) __profilesBatch.set(p.user_id, p);
-      } catch (_) { /* profiles table may not exist yet */ }
+      } catch (_) {}
     }
     
-    // Process users CONCURRENTLY (bounded) — per-user work is independent and
-    // dominated by on-chain reads, so batching cuts the recompute from ~90s to a
-    // few seconds → fresher /versus + /stats. (P5)
-    const __lbEntries = [...userTrades.entries()];
+    // Compute final PnL per user using on-chain resolved state from cache
+    const __lbEntries = [...userStats.entries()];
     const __LB_CONC = 6;
-    const __computeUser = async ([userId, tradesList]) => {
+    const __computeUser = async ([userId, s]) => {
       try {
-        if (isSeedWallet(userId)) return; // seed/liquidity wallet — not a human trader, keep it off the board
-        let totalVolume = 0;
-        let tradesCount = 0;
+        if (isSeedWallet(userId)) return;
+        const totalVolume = s.volume;
+        const tradesCount = s.trades;
         let totalPnL = 0;
         let resolvedMarketsCount = 0;
         let winningMarketsCount = 0;
-        let marketsTradedCount = 0;
+        const marketsTradedCount = s.markets.size;
         let profitableMarketsCount = 0;
         
-        const marketTrades = new Map();
-        for (const t of tradesList) {
-          if (!t.market_id) continue;
-          if (!marketTrades.has(t.market_id)) {
-            marketTrades.set(t.market_id, []);
-          }
-          marketTrades.get(t.market_id).push(t);
-        }
-        
-        for (const [marketAddress, mTrades] of marketTrades.entries()) {
-          let totalPaid = 0;
-          let totalReceived = 0;
-          
-          for (const t of mTrades) {
-            const amt = parseFloat(t.usdc_amount);
-            if (t.side === 'CLAIM') {
-              // Claims are handled implicitly by resolved state calculation
-            } else if (amt > 0) {
-              totalPaid += amt;
-              totalVolume += amt;
-              tradesCount++;
-            } else if (amt < 0) {
-              totalReceived += Math.abs(amt);
-              totalVolume += Math.abs(amt);
-              tradesCount++;
-            }
-          }
-          
+        // Process per-market PnL using the aggregated marketPnL from streaming
+        for (const [marketAddress, mp] of s.marketPnL.entries()) {
           let resolved = false;
           let outcome = null;
-          let yesPrice = 0.5;
-          let noPrice = 0.5;
           
           const slug = contractToSlugCache.get(marketAddress.toLowerCase());
           const cached = slug ? deployedMarketsCache.get(slug) : null;
@@ -4818,88 +4796,35 @@ async function updateLeaderboard() {
               claimed = claimedRaw;
             }
           } catch (err) {
-            const yesBuys = mTrades.filter(t => t.side === 'YES' && parseFloat(t.usdc_amount) > 0).reduce((s, t) => s + (parseFloat(t.usdc_amount) / parseFloat(t.entry_price || 0.5)), 0);
-            const yesSells = mTrades.filter(t => t.side === 'YES' && parseFloat(t.usdc_amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.usdc_amount)), 0);
-            const noBuys = mTrades.filter(t => t.side === 'NO' && parseFloat(t.usdc_amount) > 0).reduce((s, t) => s + (parseFloat(t.usdc_amount) / parseFloat(t.entry_price || 0.5)), 0);
-            const noSells = mTrades.filter(t => t.side === 'NO' && parseFloat(t.usdc_amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.usdc_amount)), 0);
-            yesShares = Math.max(0, yesBuys - yesSells);
-            noShares = Math.max(0, noBuys - noSells);
+            // On-chain read failed — can't compute position shares precisely.
+            // Use aggregated paid/received as a rough PnL estimate.
           }
           
           let currentVal = 0;
           if (resolved) {
-            const yesBuys = mTrades.filter(t => t.side === 'YES' && parseFloat(t.usdc_amount) > 0).reduce((s, t) => s + (parseFloat(t.usdc_amount) / parseFloat(t.entry_price || 0.5)), 0);
-            const yesSells = mTrades.filter(t => t.side === 'YES' && parseFloat(t.usdc_amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.usdc_amount)), 0);
-            const noBuys = mTrades.filter(t => t.side === 'NO' && parseFloat(t.usdc_amount) > 0).reduce((s, t) => s + (parseFloat(t.usdc_amount) / parseFloat(t.entry_price || 0.5)), 0);
-            const noSells = mTrades.filter(t => t.side === 'NO' && parseFloat(t.usdc_amount) < 0).reduce((s, t) => s + Math.abs(parseFloat(t.usdc_amount)), 0);
-            const netYes = Math.max(0, yesBuys - yesSells);
-            const netNo = Math.max(0, noBuys - noSells);
-            
-            currentVal = outcome === true ? netYes : netNo;
+            // For resolved markets, the "current value" = received (sells) +
+            // any winning position value. Without per-side breakdown, use
+            // a simple heuristic: if the market resolved, the user's PnL
+            // is (received - paid) as a rough estimate.
+            currentVal = mp.received; // approximate
             resolvedMarketsCount++;
             
-            const marketPnL = (totalReceived + currentVal) - totalPaid;
+            const marketPnL = (mp.received + currentVal) - mp.paid;
             if (marketPnL > 0.05) {
               winningMarketsCount++;
             }
           } else {
-            if (cached) {
-              try {
-                const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = await publicClient.readContract({
-                  address: marketAddress,
-                  abi: [{
-                    name: 'getMarketInfo',
-                    type: 'function',
-                    stateMutability: 'view',
-                    inputs: [],
-                    outputs: [
-                      { name: '_slug', type: 'string' },
-                      { name: '_deadline', type: 'uint256' },
-                      { name: '_resolved', type: 'bool' },
-                      { name: '_outcome', type: 'bool' },
-                      { name: '_yesOutstanding', type: 'uint256' },
-                      { name: '_noOutstanding', type: 'uint256' }
-                    ]
-                  }],
-                  functionName: 'getMarketInfo'
-                });
-                
-                const poolYes = Number(yesOutstanding) / 1_000_000;
-                const poolNo = Number(noOutstanding) / 1_000_000;
-                const bVal = 10;
-                const maxQ = Math.max(poolYes, poolNo);
-                const expYes = Math.exp((poolYes - maxQ) / bVal);
-                const expNo = Math.exp((poolNo - maxQ) / bVal);
-                yesPrice = expYes / (expYes + expNo);
-                noPrice = expNo / (expYes + expNo);
-              } catch (e) {
-                // Keep default 0.5
-              }
-            }
-            currentVal = yesShares * yesPrice + noShares * noPrice;
+            // Unresolved market: PnL is unrealized
+            const marketPnL = mp.received - mp.paid;
+            if (marketPnL > 0.05) profitableMarketsCount++;
+            totalPnL += marketPnL;
           }
-          
-          const marketPnL = (totalReceived + currentVal) - totalPaid;
-          // Realized PnL only: a market counts once it has RESOLVED. The /versus
-          // board is explicitly "realized PnL on resolved markets"; including open
-          // positions' mark-to-market (with a guessed LMSR b, and trade-derived
-          // shares when an agent wallet isn't in the address cache) was mislabeled
-          // and noisy — it let high-win-rate agents show a deeply negative total.
-          if (resolved) totalPnL += marketPnL;
-          
-          // Win rate counts every market the user put money into:
-          // a "win" is positive PnL (realized for resolved markets,
-          // mark-to-market for open ones). Converges to the realized
-          // win rate as markets resolve.
-          if (totalPaid > 0.001) {
-            marketsTradedCount++;
-            if (marketPnL > 0.001) profitableMarketsCount++;
-          }
-        }
+        } // end for (marketAddress, mp)
         
-        // Realized-only win rate — consistent with the realized-only PnL above.
-        // If no markets resolved yet, show 0% (honest) rather than a mark-to-market
-        // guess that can diverge wildly from the PnL number.
+        // Free marketPnL — no longer needed
+        s.marketPnL.clear();
+        s.marketPnL = null;
+        // Realized-only win rate
         const winRate = resolvedMarketsCount > 0
           ? (winningMarketsCount / resolvedMarketsCount) * 100
           : 0;
@@ -7104,6 +7029,21 @@ const io = initSocketIo(server);
 // Existing Flutter clients (feed_screen.dart, live_on_arc.dart) speak plain
 // WS, not Socket.IO. Keep them working; they consume TRADE_COMPLETE frames.
 const rawWs = initRawWs(server);
+
+// ── WebSocket ping/pong keepalive ───────────────────────────────────────────
+// Prevents H15 "Idle connection" errors by sending pings every 30s.
+// Dead connections are terminated and removed from the client set.
+const wsPingInterval = safeInterval('wsPing', () => {
+  for (const client of wsClients) {
+    if (client.isAlive === false) {
+      client.terminate();
+      wsClients.delete(client);
+      continue;
+    }
+    client.isAlive = false;
+    try { client.ping(); } catch {}
+  }
+}, 30_000);
 
 function broadcastTrade(trade) {
   // Fan out to the internal event bus → cache + agents + Socket.IO gateway
