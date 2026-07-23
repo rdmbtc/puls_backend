@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Traction — Puls</title>
+  <meta name="description" content="Live verifiable traction for Puls on Arc Testnet — real trades, USDC volume, 8 AI agents, and x402 nanopayments.">
+  <link rel="canonical" href="https://pulsmarket.tech/stats">
+  <meta property="og:title" content="Puls — Live Traction">
+  <meta property="og:description" content="Real users, real trades, real USDC nanopayments on Arc — verify the numbers yourself.">
+  <meta property="og:image" content="https://pulsmarket.tech/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+  <style>
+    :root {
+      --bg: #FAFBFD; --surface: #FFFFFF; --text: #0E1422; --muted: #56607A;
+      --border: #E8EBF1; --brand: #EC4899; --brand-soft: #FCE7F3; --agent: #14B8A6;
+      --skel: #EDF0F5; --shimmer: rgba(255,255,255,.65);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0A0E1A; --surface: #121829; --text: #EAF0FF; --muted: #9AA6C0;
+        --border: #283149; --brand: #F472B6; --brand-soft: #3B0A2A; --agent: #2DD4BF;
+        --skel: #1B2236; --shimmer: rgba(255,255,255,.06);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) { .sk::after { animation: none; } }
+    .sk { position: relative; overflow: hidden; background: var(--skel); border-radius: 8px; }
+    .sk::after {
+      content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, var(--shimmer), transparent);
+      animation: shimmer 1.4s ease-in-out infinite;
+    }
+    @keyframes shimmer { 100% { transform: translateX(100%); } }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: transparent; color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6; -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 48px 22px 80px; }
+    .wordmark { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; color: var(--brand); }
+    h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.7px; margin: 16px 0 4px; }
+    .sub { color: var(--muted); font-size: 15px; margin-bottom: 6px; }
+    .updated { color: var(--muted); font-size: 13px; margin-bottom: 26px; }
+    .live-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #22C55E; margin-right: 6px; vertical-align: middle;
+      box-shadow: 0 0 0 0 rgba(34,197,94,.6); animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94,.55); }
+      70% { box-shadow: 0 0 0 7px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+    .grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px; margin: 22px 0;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+      padding: 20px 18px;
+    }
+    .card .val { font-size: 34px; font-weight: 800; letter-spacing: -1px; line-height: 1.1; }
+    .card .label { color: var(--muted); font-size: 13px; margin-top: 6px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .4px; }
+    .card .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .split {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+      padding: 20px 18px; margin: 14px 0;
+    }
+    .split h2 { font-size: 15px; font-weight: 700; margin: 0 0 14px; letter-spacing: -.2px; }
+    .bar { height: 14px; border-radius: 8px; overflow: hidden; display: flex; background: var(--border); }
+    .bar .human { background: var(--brand); width: 0; transition: width 900ms cubic-bezier(0.22,1,0.36,1); }
+    .bar .agent { background: var(--agent); width: 0; transition: width 900ms cubic-bezier(0.22,1,0.36,1); }
+    @media (prefers-reduced-motion: reduce) { .bar .human, .bar .agent { transition: none; } }
+    .legend { display: flex; gap: 18px; margin-top: 12px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+    .legend b { color: var(--text); }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+    .notice {
+      background: var(--brand-soft); border: 1px solid var(--border); border-radius: 14px;
+      padding: 13px 16px; font-size: 13px; color: var(--text); margin: 22px 0 0;
+    }
+    .links { margin-top: 22px; font-size: 14px; }
+    .links a { color: var(--brand); text-decoration: none; font-weight: 600; margin-right: 18px; }
+    .links a:hover { text-decoration: underline; }
+    footer { margin-top: 34px; color: var(--muted); font-size: 12px; }
+    .err { color: #EF4444; font-size: 14px; }
+  
+    /* --- Puls Premium Upgrades --- */
+    .wrap {
+      animation: fadeIn 0.6s ease-out forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .idcard, .stat, .feed-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+      background: rgba(var(--surface-rgb, 255, 255, 255), 0.7);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+    @media (prefers-color-scheme: dark) {
+      .idcard, .stat, .feed-card {
+        background: rgba(18, 24, 41, 0.65);
+      }
+    }
+    .idcard:hover, .stat:hover, .feed-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 32px var(--shadow);
+      border-color: var(--brand);
+    }
+    a.addr {
+      transition: all 0.15s ease;
+    }
+    a.addr:hover {
+      background: var(--brand);
+      color: #fff;
+      transform: scale(1.02);
+      text-decoration: none;
+    }
+    /* ----------------------------- */
+
+    /* --- Premium Polish --- */
+
+    /* animated mesh background */
+    .mesh{position:fixed;inset:0;z-index:-2;overflow:hidden;background:var(--bg)}
+    .mesh::before,.mesh::after{content:"";position:absolute;width:60vw;height:60vw;border-radius:50%;filter:blur(130px);opacity:.35;animation:drift 24s ease-in-out infinite}
+    .mesh::before{background:radial-gradient(circle,#EC4899,transparent 60%);top:-15vw;left:-10vw}
+    .mesh::after{background:radial-gradient(circle,#2DD4BF,transparent 60%);bottom:-20vw;right:-10vw;animation-delay:-12s}
+    .mesh i{position:absolute;width:45vw;height:45vw;border-radius:50%;filter:blur(130px);opacity:.25;background:radial-gradient(circle,#8B5CF6,transparent 60%);top:20vw;left:40vw;animation:drift 28s ease-in-out infinite reverse}
+    @keyframes drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(6vw,4vw) scale(1.1)}66%{transform:translate(-5vw,3vw) scale(.95)}}
+    .grid-ov{position:fixed;inset:0;z-index:-1;background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:46px 46px;mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 75%)}
+
+    /* Bento grid perfect corners fix */
+    .features, .feat { overflow:hidden; border-radius:16px; gap:1px; background:var(--border); }
+    .card, .fc { border-radius:0 !important; border:none !important; margin:0 !important; }
+    .card::before, .fc::before { border-radius:0 !important; }
+
+    .noise{position:fixed;inset:0;z-index:-1;pointer-events:none;background-image:url('data:image/svg+xml,%3Csvg viewBox=%220 0 200 200%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noise%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noise)%22/%3E%3C/svg%3E');opacity:0.04;mix-blend-mode:overlay;}
+
+    /* Premium Button interactions */
+    .btn, .btn2, .cta, .ghost { transition:transform .15s cubic-bezier(0.2,0.8,0.2,1), box-shadow .2s, border-color .15s, background .15s !important; }
+    .btn:active, .btn2:active, .cta:active, .ghost:active { transform:scale(0.96) !important; }
+    
+    .pill{transition:transform .2s ease, box-shadow .2s ease;}
+    .pill:hover{transform:translateY(-1px);box-shadow:0 4px 12px -4px rgba(45,212,191,0.3);}
+
+    /* Nav Links */
+    nav a.l{position:relative;}
+    nav a.l::after{content:'';position:absolute;bottom:-4px;left:0;width:100%;height:2px;background:var(--pink-soft, rgba(236,72,153,0.3));transform:scaleX(0);transform-origin:right;transition:transform .3s cubic-bezier(0.2,0.8,0.2,1);}
+    nav a.l:hover::after{transform:scaleX(1);transform-origin:left;background:var(--pink, #EC4899);}
+    nav a.l.active::after{transform:scaleX(1);background:var(--mint, #2DD4BF);transform-origin:left;}
+
+    /* Premium glow hover for bento features and cards */
+    .fc, .card, .stat, .idcard, .feed-card, .market, .store {
+        position:relative;
+        border-radius: 16px;
+        background-clip: padding-box;
+        transition:transform .4s cubic-bezier(0.2, 0.8, 0.2, 1), background .2s, box-shadow .4s, border-color .2s !important;
+    }
+    
+    .fc::before, .card::before, .stat::before, .idcard::before, .feed-card::before, .market::before, .store::before {
+        content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;
+        background:linear-gradient(100deg,#EC4899 0%,#F472B6 30%,#8B5CF6 55%,#38BDF8 78%,#2DD4BF 100%);
+        -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+        -webkit-mask-composite:xor;mask-composite:exclude;
+        opacity:0;transition:opacity .4s ease;pointer-events:none;z-index:2;
+    }
+    
+    .fc:hover::before, .card:hover::before, .stat:hover::before, .idcard:hover::before, .feed-card:hover::before, .market:hover::before, .store:hover::before {
+        opacity:0.85;
+    }
+    .fc:hover, .card:hover, .stat:hover, .idcard:hover, .feed-card:hover, .market:hover, .store:hover {
+        transform:translateY(-3px);
+        box-shadow:0 16px 40px -12px rgba(0,0,0,0.6);
+        border-color:transparent !important;
+    }
+
+  
+    /* --- Bento Grid Corner Fix --- */
+    .feat { overflow: hidden; border-radius: 16px; gap: 1px; background: var(--border); border: 1px solid var(--border); }
+    .feat .fc { border-radius: 0 !important; border: none !important; }
+    .feat .fc::before { border-radius: 0 !important; }
+
+    /* GPU-accelerated scroll + reveal-on-scroll */
+    html { scroll-behavior: smooth; }
+    .reveal { opacity: 0; transform: translateY(16px); transition: opacity .5s ease, transform .5s ease; will-change: opacity, transform; }
+    .reveal.in { opacity: 1; transform: translateY(0); }
+    @media (prefers-reduced-motion: reduce) {
+      .reveal { opacity: 1; transform: none; transition: none; }
+      html { scroll-behavior: auto; }
+    }
+  </style>
+  <!-- Vercel Web Analytics + Speed Insights (enable both in the Vercel project dashboard) -->
+  <script defer src="/_vercel/insights/script.js"></script>
+  <script defer src="/_vercel/speed-insights/script.js"></script>
+</head>
+<body>
+  <div class="noise"></div>
+  <div class="mesh"><i></i></div>
+  <div class="grid-ov"></div>
+  <nav style="position:sticky;top:0;z-index:50;backdrop-filter:saturate(180%) blur(10px);background:color-mix(in srgb,var(--bg) 82%,transparent);border-bottom:1px solid var(--border);">
+    <div style="max-width:760px;margin:0 auto;padding:10px 20px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:13.5px;font-weight:700;">
+      <a href="/" style="color:var(--brand);text-decoration:none;letter-spacing:-.4px;font-weight:800;font-size:15px;margin-right:6px;">Puls</a>
+      <a href="/explorer" style="color:var(--muted);text-decoration:none;">Explorer</a>
+      <a href="/agent" style="color:var(--muted);text-decoration:none;">Agent</a>
+      <a href="/pulse" style="color:var(--muted);text-decoration:none;">Pulse</a>
+      <a href="/versus" style="color:var(--muted);text-decoration:none;">Versus</a>
+      <a href="/stats" style="color:var(--brand);text-decoration:none;" aria-current="page">Stats</a>
+      <a href="/build" style="color:var(--muted);text-decoration:none;">Build</a>
+      <a href="/" style="margin-left:auto;color:#fff;background:var(--brand);text-decoration:none;border-radius:9px;padding:6px 14px;">Open app →</a>
+    </div>
+  </nav>
+  <div class="wrap">
+    <header>
+      <div class="wordmark">Puls</div>
+      <h1>Live traction</h1>
+      <div class="sub">The forecast economy on <b>Arc Testnet</b> — humans and AI agents trade, and creators get paid per insight in USDC nanopayments.</div>
+      <div class="updated"><span class="live-dot"></span><span id="status">Loading live numbers from production…</span></div>
+    </header>
+
+    <div class="grid reveal" id="cards">
+      <div class="card"><div class="sk" style="height:32px;width:60%"></div><div class="sk" style="height:11px;width:82%;margin-top:15px"></div><div class="sk" style="height:9px;width:54%;margin-top:9px"></div></div>
+      <div class="card"><div class="sk" style="height:32px;width:52%"></div><div class="sk" style="height:11px;width:74%;margin-top:15px"></div><div class="sk" style="height:9px;width:60%;margin-top:9px"></div></div>
+      <div class="card"><div class="sk" style="height:32px;width:58%"></div><div class="sk" style="height:11px;width:70%;margin-top:15px"></div><div class="sk" style="height:9px;width:50%;margin-top:9px"></div></div>
+      <div class="card"><div class="sk" style="height:32px;width:48%"></div><div class="sk" style="height:11px;width:78%;margin-top:15px"></div><div class="sk" style="height:9px;width:46%;margin-top:9px"></div></div>
+    </div>
+
+    <div class="split" id="splitWrap" style="display:none">
+      <h2>Humans vs. AI agents — trades</h2>
+      <div class="bar"><div class="human" id="barHuman"></div><div class="agent" id="barAgent"></div></div>
+      <div class="legend">
+        <span><span class="dot" style="background:var(--brand)"></span><b id="lgHuman">0</b> human trades</span>
+        <span><span class="dot" style="background:var(--agent)"></span><b id="lgAgent">0</b> agent trades</span>
+        <span id="lgAgents"></span>
+      </div>
+    </div>
+
+    <div class="notice">
+      Every number here is pulled live from the Puls production backend and is verifiable onchain.
+      Onchain settlement is visible on the Arc explorer; in-app nanopayment receipts are surfaced in the app's Earnings tab.
+      Puls runs on <b>Arc Testnet</b> — this is a prototype, not financial advice, 18+.
+    </div>
+
+    <div class="links">
+      <a href="https://pulsmarket.tech">Open the app →</a>
+      <a href="https://pulsmarket.tech/agent">Agent Decision Trace</a>
+      <a href="https://docs.pulsmarket.tech">Docs</a>
+      <a href="https://testnet.arcscan.app" id="explorerLink" target="_blank" rel="noopener">Arc explorer</a>
+    </div>
+
+    <footer>
+      Puls · pulsmarket.tech · built on the Circle stack (SCA gasless wallets, Gateway x402 nanopayments) settled on Arc.
+    </footer>
+  </div>
+
+  <script>
+    var API = 'https://api.pulsmarket.tech';
+    var nf = new Intl.NumberFormat('en-US');
+    var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var prev = {}; // last numeric value per key, so refreshes animate from where we were
+    function usd(n) {
+      if (n == null) return '—';
+      if (n < 1) return '$' + Number(n).toFixed(n < 0.01 ? 6 : 4).replace(/0+$/,'').replace(/\.$/,'');
+      return '$' + nf.format(Math.round(n * 100) / 100);
+    }
+    // Animate an element's number from its previous value up to `to`, reformatting each frame.
+    function countUp(el, key, to, fmt) {
+      if (!el) return;
+      to = Number(to) || 0;
+      var from = prev[key] == null ? 0 : prev[key];
+      prev[key] = to;
+      if (reduceMotion || from === to) { el.textContent = fmt(to); return; }
+      var start = null, dur = 900;
+      function frame(ts) {
+        if (start == null) start = ts;
+        var p = Math.min(1, (ts - start) / dur);
+        var eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+        el.textContent = fmt(from + (to - from) * eased);
+        if (p < 1) requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+    var intFmt = function (v) { return nf.format(Math.round(v)); };
+    function card(id, label, hint) {
+      return '<div class="card"><div class="val" id="' + id + '">0</div>' +
+        '<div class="label">' + label + '</div>' +
+        (hint ? '<div class="hint">' + hint + '</div>' : '') + '</div>';
+    }
+    var built = false;
+    function render(d) {
+      var nano = d.nanopayments || { count: 0, volumeUsdc: 0 };
+      if (!built) {
+        document.getElementById('cards').innerHTML = [
+          card('vUsers', 'Users onboarded', 'Google sign-in → Circle wallet'),
+          card('vTrades', 'Trades settled', '<span id="hTrades">' + usd(d.volumeUsdc) + '</span> volume'),
+          card('vNano', 'Nanopayments', '<span id="hNano">' + usd(nano.volumeUsdc) + '</span> in USDC'),
+          card('vMarkets', 'Markets live', '<span id="hMarkets">' + (d.marketsResolved || 0) + '</span> resolved')
+        ].join('');
+        built = true;
+      }
+      countUp(document.getElementById('vUsers'), 'users', d.users || 0, intFmt);
+      countUp(document.getElementById('vTrades'), 'trades', d.trades || 0, intFmt);
+      countUp(document.getElementById('vNano'), 'nano', nano.count || 0, intFmt);
+      countUp(document.getElementById('vMarkets'), 'markets', d.marketsDeployed || 0, intFmt);
+      var hT = document.getElementById('hTrades'); if (hT) hT.textContent = usd(d.volumeUsdc);
+      var hN = document.getElementById('hNano'); if (hN) hN.textContent = usd(nano.volumeUsdc);
+      var hM = document.getElementById('hMarkets'); if (hM) hM.textContent = (d.marketsResolved || 0);
+
+      var ht = d.humanTrades || 0, at = d.agentTrades || 0, tot = ht + at;
+      if (tot > 0) {
+        document.getElementById('splitWrap').style.display = 'block';
+        document.getElementById('barHuman').style.width = (ht / tot * 100) + '%';
+        document.getElementById('barAgent').style.width = (at / tot * 100) + '%';
+        countUp(document.getElementById('lgHuman'), 'lgHuman', ht, intFmt);
+        countUp(document.getElementById('lgAgent'), 'lgAgent', at, intFmt);
+        if (d.agents) document.getElementById('lgAgents').innerHTML = '<b>' + d.agents + '</b> autonomous agents';
+      }
+      var when = d.updatedAt ? new Date(d.updatedAt) : new Date();
+      _lastUpdate = when;
+      updateAgo();
+    }
+    var _lastUpdate = null;
+    function updateAgo() {
+      if (!_lastUpdate) return;
+      var s = Math.floor((Date.now() - _lastUpdate.getTime()) / 1000);
+      var str = s < 5 ? 'just now' : s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago';
+      document.getElementById('status').innerHTML = '<span class="live-dot"></span> Live · updated ' + str;
+    }
+    setInterval(updateAgo, 1000);
+    function load() {
+      fetch(API + '/api/stats', { cache: 'no-store' })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(render)
+        .catch(function (e) {
+          document.getElementById('status').innerHTML =
+            '<span class="err">Could not load live numbers right now (' + e.message + '). Retrying…</span>';
+        });
+    }
+    load();
+    setInterval(load, 30000);
+
+    // IntersectionObserver: reveal sections on scroll (GPU-accelerated)
+    var io = new IntersectionObserver(function(entries) {
+      entries.forEach(function(e) {
+        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.1 });
+    document.querySelectorAll('.reveal').forEach(function(el) { io.observe(el); });
+  </script>
+  <script defer src="/nav.js"></script>
+</body>
+</html>
+
