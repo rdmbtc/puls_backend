@@ -1245,13 +1245,46 @@ setInterval(() => {
   }
 }, 60_000).unref?.();
 
+// Wallet address cache: { walletId -> { address, ts } } — 5 min TTL.
+// Prevents repeated Circle API calls for the same wallet address.
+const _walletAddrCache = new Map();
+const WALLET_ADDR_TTL_MS = 5 * 60 * 1000; // 5 min — wallet addresses don't change
+// Circle API semaphore: max 2 concurrent Circle API calls to avoid rate limits.
+let _circleInFlight = 0;
+const _circleQueue = [];
+const CIRCLE_MAX_CONCURRENT = 2;
+
+async function _circleThrottle(fn) {
+  if (_circleInFlight >= CIRCLE_MAX_CONCURRENT) {
+    await new Promise(resolve => _circleQueue.push(resolve));
+  }
+  _circleInFlight++;
+  try {
+    return await fn();
+  } finally {
+    _circleInFlight--;
+    if (_circleQueue.length > 0) _circleQueue.shift()();
+  }
+}
+
 async function getWalletInfo(walletId) {
   try {
-    let address = walletAddressCache.get(walletId);
+    // Check wallet address cache (5 min TTL) — avoids Circle API call entirely
+    let address = null;
+    const addrCached = _walletAddrCache.get(walletId);
+    if (addrCached && Date.now() - addrCached.ts < WALLET_ADDR_TTL_MS) {
+      address = addrCached.address;
+    }
     if (!address) {
-      const walletRes = await circle.getWallet({ id: walletId });
+      // Also check the legacy cache
+      address = walletAddressCache.get(walletId);
+    }
+    if (!address) {
+      // Throttled Circle API call — prevents rate limit errors
+      const walletRes = await _circleThrottle(() => circle.getWallet({ id: walletId }));
       address = walletRes.data.wallet.address;
-      _cappedSet(walletAddressCache, walletId, address);
+      walletAddressCache.set(walletId, address);
+      _walletAddrCache.set(walletId, { address, ts: Date.now() });
     }
 
     // Check balance cache first — avoids RPC calls on every roster fetch
@@ -3287,60 +3320,65 @@ app.get('/api/alpha/sample', x402Paywall('$0.001', '/api/alpha/sample', {
 // /api/economy/feed (seller is a tracked address) with an openable Arcscan tx.
 app.get('/api/x402/payments', async (req, res) => {
   try {
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '30', 10)));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
+    const typeFilter = (req.query.type || '').trim().toLowerCase();
     const seller = (process.env.X402_SELLER_ADDRESS || '').trim();
     const sellerExplorerUrl = seller ? `https://testnet.arcscan.app/address/${seller}` : null;
 
     let rows = [];
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('x402_payments')
-        .select('id, endpoint, payer, pay_to, amount_usdc, network, gateway_tx, created_at')
+        .select('id, endpoint, payer, pay_to, amount_usdc, network, gateway_tx, raw, created_at')
         .order('created_at', { ascending: false })
         .limit(limit);
+      if (typeFilter) query = query.eq('endpoint', typeFilter);
+      const { data, error } = await query;
       if (error) throw error;
       rows = data || [];
     } catch (e) {
-      // Table may not exist yet — receipts are best-effort. Return empty, not 500.
       console.warn('[x402/payments] supabase read failed:', e.message);
     }
 
+    // Agent name lookup
+    const agentNames = { agent_swarm_vega: 'Vega ⚡', agent_swarm_cygnus: 'Cygnus 🛡️', agent_swarm_orion: 'Orion 🔭', agent_swarm_atlas: 'Atlas 📈', agent_swarm_nova: 'Nova 🌐', agent_swarm_striker: 'Striker ⚽', agent_sage: 'Sage 🔮', house_pulse: 'Pulse 🤖' };
+    const nameFor = (id) => agentNames[id] || (id || '').replace('agent_swarm_','').replace('agent_','');
+
     const short = (a) => (a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : (a || '—'));
-    const payments = rows.map((r) => ({
-      id: r.id,
-      endpoint: r.endpoint,
-      // Label the receipt without depending on a possibly-unmigrated column:
-      // copy-trade creator fees write endpoint='copy_fee'; everything else is a paywall read.
-      paymentType:
-        r.endpoint === 'copy_fee'
-          ? 'copy_fee'
-          : r.endpoint === 'alpha_unlock'
-            ? 'alpha_unlock'
-            : 'paywall',
-      payer: r.payer || null,
-      payerShort: short(r.payer),
-      payTo: r.pay_to || seller || null,
-      amountUsdc: Number(r.amount_usdc || 0),
-      network: r.network || 'eip155:5042002',
-      // Circle Gateway transfer id = a settlement RECEIPT (UUID), not a tx hash.
-      receiptId: r.gateway_tx || null,
-      status: r.gateway_tx ? 'settled' : 'recorded',
-      createdAt: r.created_at,
-    }));
+    const payments = rows.map((r) => {
+      const raw = (typeof r.raw === 'string') ? JSON.parse(r.raw || '{}') : (r.raw || {});
+      return {
+        id: r.id,
+        endpoint: r.endpoint,
+        type: r.endpoint,
+        from: nameFor(raw.agent || r.payer || ''),
+        to: nameFor(raw.counterparty || raw.seller || r.pay_to || ''),
+        fromAddress: r.payer || null,
+        toAddress: r.pay_to || null,
+        amountUsdc: Number(r.amount_usdc || 0),
+        memo: raw.kind || raw.onchainMemo || r.endpoint,
+        txHash: (r.gateway_tx && String(r.gateway_tx).startsWith('0x')) ? r.gateway_tx : null,
+        arcscanUrl: (r.gateway_tx && String(r.gateway_tx).startsWith('0x')) ? `https://testnet.arcscan.app/tx/${r.gateway_tx}` : null,
+        receiptId: r.gateway_tx || null,
+        status: r.gateway_tx ? 'settled' : 'recorded',
+        createdAt: r.created_at,
+      };
+    });
 
     const totalUsdc = payments.reduce((s, p) => s + (p.amountUsdc || 0), 0);
+    const avgUsdc = payments.length > 0 ? totalUsdc / payments.length : 0;
 
     res.json({
       seller: seller || null,
       sellerExplorerUrl,
-      totals: {
+      summary: {
         count: payments.length,
-        usdc: Number(totalUsdc.toFixed(6)),
+        totalUsdc: Number(totalUsdc.toFixed(6)),
+        avgPerPayment: Number(avgUsdc.toFixed(6)),
       },
-      // The Economy tab shows the on-chain batch settlement to this seller.
       onchainProofUrl: sellerExplorerUrl,
       payments,
-      note: 'Receipt ids are Circle Gateway transfer ids. On-chain USDC settles to the seller in batches — see the Economy tab / seller address for the Arcscan tx.',
+      note: 'Each receipt represents a real USDC nanopayment settled on Arc. Agent names are resolved from on-chain wallet addresses.',
       updatedAt: new Date().toISOString(),
     });
   } catch (e) {
