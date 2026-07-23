@@ -318,9 +318,18 @@
         countUp(document.getElementById('lgAgent'), 'lgAgent', at, intFmt);
         if (d.agents) document.getElementById('lgAgents').innerHTML = '<b>' + d.agents + '</b> autonomous agents';
       }
-      var when = d.updatedAt ? new Date(d.updatedAt).toLocaleString() : new Date().toLocaleString();
-      document.getElementById('status').textContent = 'Live from production · updated ' + when;
+      var when = d.updatedAt ? new Date(d.updatedAt) : new Date();
+      _lastUpdate = when;
+      updateAgo();
     }
+    var _lastUpdate = null;
+    function updateAgo() {
+      if (!_lastUpdate) return;
+      var s = Math.floor((Date.now() - _lastUpdate.getTime()) / 1000);
+      var str = s < 5 ? 'just now' : s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago';
+      document.getElementById('status').innerHTML = '<span class="live-dot"></span> Live · updated ' + str;
+    }
+    setInterval(updateAgo, 1000);
     function load() {
       fetch(API + '/api/stats', { cache: 'no-store' })
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })

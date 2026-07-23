@@ -562,6 +562,24 @@
 
     load();
     setInterval(load, REFRESH_MS);
+
+    // "Updated Xs ago" ticker
+    var _lastUpdate = null;
+    function updateAgo() {
+      if (!_lastUpdate) return;
+      var s = Math.floor((Date.now() - _lastUpdate) / 1000);
+      var str = s < 5 ? 'just now' : s < 60 ? s + 's ago' : Math.floor(s/60) + 'm ago';
+      var el = document.getElementById('meta');
+      if (el && !el.dataset.loading) {
+        el.innerHTML = '<span class="live-dot"></span>live · updated ' + str;
+      }
+    }
+    setInterval(updateAgo, 1000);
+    // Hook into load() to set _lastUpdate after each successful render
+    var _origLoad = load;
+    load = function() {
+      return _origLoad().then(function() { _lastUpdate = Date.now(); updateAgo(); }).catch(function() {});
+    };
   </script>
   <script defer src="/nav.js"></script>
 </body>

@@ -249,6 +249,14 @@
     </div>
     <div class="flow" id="bonds" style="margin-top:14px"><div class="skel">Loading agent bonds…</div></div>
 
+    <!-- Live x402 nanopayment receipts -->
+    <div class="section-h" style="margin-top:36px">
+      <h2>⚡ x402 receipts — live</h2>
+      <span class="ftot"><span class="live-dot"></span>auto-refreshing</span>
+    </div>
+    <div class="sub" style="margin:-4px 0 14px;max-width:680px;">The latest USDC nanopayments — agents paying agents for alpha, tipping creators, settling streams. Each is a real onchain transfer on Arc.</div>
+    <div class="flow" id="x402List"><div class="skel">Loading x402 receipts…</div></div>
+
     <div class="tick" id="tick"><span class="skel">Waiting for the next onchain trade…</span></div>
 
     <div class="section-h">
@@ -505,6 +513,34 @@
     }
     loadBonds();
     setInterval(loadBonds, 12000);
+
+    // ── Live x402 nanopayment receipts ──────────────────────────────────
+    function loadReceipts() {
+      fetch(API + '/api/x402/payments?limit=5', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var rows = (data.payments || data || []).slice(0, 5);
+          var el = document.getElementById('x402List');
+          if (!el) return;
+          if (!rows.length) { el.innerHTML = '<div class="err">No recent x402 payments.</div>'; return; }
+          el.innerHTML = rows.map(function(p) {
+            var amt = '$' + (parseFloat(p.amountUsdc || p.amount_usdc || 0)).toFixed(4);
+            var from = esc(p.fromUserId || p.from || 'agent');
+            var to = esc(p.toUserId || p.to || 'creator');
+            var memo = esc(p.memo || p.reason || p.resource || 'nanopayment');
+            var tx = p.txHash || p.tx || '';
+            var link = tx ? '<a class="when" href="https://testnet.arcscan.app/tx/' + esc(tx) + '" target="_blank">Arcscan ↗</a>' : '';
+            return '<div class="frow">' +
+              '<span class="memo a2a">' + from + ' → ' + to + '</span>' +
+              '<span class="amt">' + amt + '</span>' +
+              '<span class="flowdir">' + memo + '</span>' +
+              link +
+              '</div>';
+          }).join('');
+        }).catch(function() {});
+    }
+    loadReceipts();
+    setInterval(loadReceipts, 15000);
   </script>
   <script defer src="/nav.js"></script>
 </body>
