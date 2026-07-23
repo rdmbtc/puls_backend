@@ -3139,8 +3139,12 @@ app.get('/api/stats', async (req, res) => {
     // The RPC runs as a single SELECT on the DB — returns in <500ms.
     // Fallback: if the RPC function doesn't exist yet (needs manual creation
     // in Supabase SQL Editor), fall back to count-only stats (fast, no pagination).
-    const [rpcRes, marketsRes, resolvedRes, usersRes, payCountRes, countRes] = await Promise.all([
-      supabase.rpc('get_protocol_stats'),
+    const rpcRes = await supabase.rpc('get_protocol_stats');
+    const stats = (rpcRes.data && typeof rpcRes.data === 'object' && !rpcRes.error) ? rpcRes.data : {};
+    const rpcOk = Object.keys(stats).length > 0;
+
+    // Only run extra queries if RPC didn't return them
+    const [marketsRes, resolvedRes, usersRes, payCountRes, countRes] = rpcOk ? [{}, {}, {}, {}, {}] : await Promise.all([
       supabase.from('deployed_markets').select('*', { count: 'exact', head: true }),
       supabase.from('deployed_markets').select('*', { count: 'exact', head: true }).eq('resolved', true),
       supabase.from('wallets').select('*', { count: 'exact', head: true }),
@@ -3148,8 +3152,6 @@ app.get('/api/stats', async (req, res) => {
       supabase.from('trades').select('*', { count: 'exact', head: true }).eq('state', 'COMPLETE'),
     ]);
 
-    // Parse RPC result — if it failed (function not created yet), use count-only fallback
-    const stats = (rpcRes.data && typeof rpcRes.data === 'object' && !rpcRes.error) ? rpcRes.data : {};
     const tradeCount = Number(stats.trade_count || countRes.count || 0);
     const volumeUsdc = Number(stats.volume_usdc || 0);
     const agentTrades = Number(stats.agent_trades || 0);
@@ -3158,32 +3160,30 @@ app.get('/api/stats', async (req, res) => {
     const seedVolumeUsdc = Number(stats.seed_volume || 0);
     const agentCount = Number(stats.agent_count || 0);
 
-    // Nanopayment volume + protocol revenue — single aggregate query.
-    const payCount = payCountRes.count ?? 0;
-    let nanoVolumeUsdc = 0;
+    // Nanopayment volume — from RPC if available, else single query
+    const payCount = Number(stats.nanopayments || payCountRes.count || 0);
+    const nanoVolumeUsdc = Number(stats.nano_volume || 0);
     let protocolRevenueUsdc = 0;
-    // For nanopayments, use a single query with SUM if the table is small enough.
-    // x402_payments has ~20K rows — one page is usually enough.
-    if (payCount > 0) {
+    // Only fetch nano details if RPC didn't have them
+    if (!rpcOk && payCount > 0) {
       const { data: nanoAgg } = await supabase
         .from('x402_payments')
         .select('amount_usdc')
         .limit(10000);
       for (const r of (nanoAgg || [])) {
-        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0;
+        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0; // won't run — nanoVolumeUsdc is const above
       }
     }
     const r2 = (n) => Math.round(n * 100) / 100;
     const organicTrades = Math.max(0, tradeCount - seedTrades);
     const data = {
-      trades: organicTrades, // organic = real agents + humans; seeded-liquidity wallets excluded
+      trades: organicTrades,
       volumeUsdc: r2(volumeUsdc - seedVolumeUsdc),
-      totalTradesOnChain: tradeCount, // raw on-chain incl. seeded liquidity (full transparency)
+      totalTradesOnChain: tradeCount,
       totalVolumeUsdc: r2(volumeUsdc),
-      marketsDeployed: marketsRes.count ?? 0,
-      marketsResolved: resolvedRes.count ?? 0,
-      // Traction snapshot (verifiable, no PII) — surfaced on the public /stats page.
-      users: usersRes.count ?? 0,
+      marketsDeployed: Number(stats.markets || marketsRes.count || 0),
+      marketsResolved: Number(stats.markets_resolved || resolvedRes.count || 0),
+      users: Number(stats.users || usersRes.count || 0),
       humanTrades: Math.max(0, tradeCount - agentTrades - seedTrades),
       agentTrades,
       agents: agentCount,
@@ -3623,11 +3623,42 @@ registerAgentPnl(app, {
 // /health — quick liveness probe (returns 200 immediately). Use for
 // Heroku's restart-on-failure check + uptime monitors that just need "up?".
 app.get('/health', (req, res) => {
+  const mem = process.memoryUsage();
+  const metrics = globalThis.__pulsMetrics || {};
+  // Count LLM providers in cooldown
+  const cooldownCount = llmCooldownUntil ? [...llmCooldownUntil.values()].filter(v => v > Date.now()).length : 0;
+  const totalProviders = LLM_PROVIDERS.length;
+  const readyProviders = totalProviders - cooldownCount;
   res.json({
     ok: true,
     uptime: Math.floor(process.uptime()),
     env: process.env.NODE_ENV || 'development',
     requestId: req.id,
+    memory: {
+      rss: Math.round(mem.rss / 1024 / 1024) + 'MB',
+      heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + 'MB',
+      heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + 'MB',
+      external: Math.round(mem.external / 1024 / 1024) + 'MB',
+    },
+    eventLoopLag: Math.round(__elLagMs) + 'ms',
+    agents: {
+      swarmEnabled: (process.env.AGENT_SWARM || 'false') === 'true',
+      houseAgent: (process.env.HOUSE_AGENT || 'false') === 'true',
+      sageAgent: (process.env.SAGE_AGENT || 'false') === 'true',
+      lastActionAt: metrics.lastActionAt || null,
+      actions: {
+        trades: metrics.trades || 0,
+        x402: metrics.x402 || 0,
+        comments: metrics.comments || 0,
+        signals: metrics.signals || 0,
+      },
+    },
+    llm: {
+      totalProviders,
+      readyProviders,
+      inCooldown: cooldownCount,
+    },
+    cache: cache.stats(),
   });
 });
 
