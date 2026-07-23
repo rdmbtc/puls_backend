@@ -54,6 +54,19 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[UNHANDLED REJECTION]', msg);
 });
 
+// CRITICAL: Catch synchronous throws that would otherwise crash the process.
+// Node defaults to exiting on uncaughtException — we override that so a
+// single sync error in a callback doesn't kill the server and drop all
+// active trades + WebSocket connections.
+process.on('uncaughtException', (err, origin) => {
+  const msg = err?.message || String(err);
+  console.error('[UNCAUGHT EXCEPTION]', origin, msg);
+  if (err?.stack) console.error(err.stack);
+  captureException(err instanceof Error ? err : new Error(msg));
+  // Do NOT exit — log and continue. Heroku will restart if the process
+  // truly becomes unresponsive, but we give it a chance to recover.
+});
+
 // Real rate limiters (previously no-ops). Tune via env if needed.
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -193,20 +206,46 @@ app.get('/api/health', (req, res) => {
   const la = os.loadavg();
   res.json({
     ok: true, service: 'puls-backend', uptimeSec: Math.round(process.uptime()), ts: Date.now(),
-    rssMb: Math.round(mem.rss / 1048576),
-    heapUsedMb: Math.round(mem.heapUsed / 1048576),
+    memory: {
+      heapUsedMb: Math.round(mem.heapUsed / 1048576),
+      heapTotalMb: Math.round(mem.heapTotal / 1048576),
+      rssMb: Math.round(mem.rss / 1048576),
+      externalMb: Math.round(mem.external / 1048576),
+    },
     sysMemUsedMb: Math.round((os.totalmem() - os.freemem()) / 1048576),
     sysMemTotalMb: Math.round(os.totalmem() / 1048576),
     cpus: os.cpus().length,
     load1: +la[0].toFixed(2), load5: +la[1].toFixed(2), load15: +la[2].toFixed(2),
     eventLoopLagMs: __elLagMs,
     agents: (globalThis.__pulsMetrics || {}),
+    circuitBreakers: {
+      circle: { isOpen: circleBreaker.isOpen(), failures: circleBreaker.failures },
+    },
   });
 });
 
 app.use(generalLimiter); // Apply general rate limit globally
 app.use(requestId);      // Generate/propagate x-request-id for log correlation
 app.use(sentryRequestHandler); // Sentry performance + error instrumentation
+
+// ── Request timeout middleware ──────────────────────────────────────────────
+// Prevents hung endpoints from consuming a connection forever. Trade endpoints
+// get 60s (on-chain settlement can be slow); everything else gets 30s.
+app.use((req, res, next) => {
+  const timeout = req.path.startsWith('/api/trade') ? 60000 : 30000;
+  const timer = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Gateway timeout', path: req.path, method: req.method });
+    }
+  }, timeout);
+  res.on('finish', () => clearTimeout(timer));
+  next();
+});
+
+// ── asyncHandler: wrap async route handlers so uncaught rejections hit the ──
+// global error handler instead of crashing the process or hanging the request.
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
 
 // Supabase JWT Authenticate Middleware
 const authenticateUser = async (req, res, next) => {
@@ -403,6 +442,31 @@ const supabaseAnon = createClient(
 );
 
 const USDC = '0x3600000000000000000000000000000000000000';
+
+// ── Circle API Circuit Breaker ─────────────────────────────────────────────
+// After 5 consecutive failures, stops calling Circle for 60s to avoid
+// cascading rate-limit / outage spirals. Resets on any success.
+const circleBreaker = {
+  failures: 0,
+  openUntil: 0,
+  record() { this.failures++; if (this.failures >= 5) { this.openUntil = Date.now() + 60000; console.warn(`[circleBreaker] OPEN — 5 failures, pausing Circle calls for 60s`); } },
+  reset() { this.failures = 0; this.openUntil = 0; },
+  isOpen() { return Date.now() < this.openUntil; },
+};
+
+// ── Supabase retry helper ───────────────────────────────────────────────────
+// Retries a Supabase query up to `retries` times with exponential backoff.
+// Use for critical queries where a transient Supabase hiccup shouldn't 500.
+async function supabaseRetry(fn, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+}
 let walletSetId = (process.env.WALLET_SET_ID || '').trim();
 
 // Wallet account type for newly created user wallets.
@@ -1012,6 +1076,23 @@ async function getOrDeployMarket(slug, deadlineSeconds) {
   });
 
   return promise;
+}
+
+// ── Interval manager: error-boundary wrapper for all cron jobs ──────────────
+// Collects all setInterval IDs so they can be cleared on graceful shutdown.
+// Wraps each callback in try/catch so a single throw doesn't silently kill
+// the interval (Node stops re-running it on uncaught exception).
+const intervalIds = [];
+function safeInterval(name, fn, ms) {
+  const id = setInterval(async () => {
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`[interval:${name}] error:`, e?.message || String(e));
+    }
+  }, ms);
+  intervalIds.push(id);
+  return id;
 }
 
 // ── Supabase helpers ──────────────────────────────────────────────────────────
@@ -6956,6 +7037,22 @@ cache.subscribe();
 // Sentry error handler — MUST be after all routes, before app.listen.
 // Captures unhandled exceptions in route handlers and forwards them as 500s.
 app.use(sentryErrorHandler);
+
+// ── Global Express error handler ────────────────────────────────────────────
+// Catches any uncaught error from a route handler (sync or async via
+// asyncHandler). Returns a JSON error — never a bare 500 HTML page.
+app.use((err, req, res, _next) => {
+  const isProd = process.env.NODE_ENV === 'production';
+  console.error('[UNHANDLED ROUTE ERROR]', req.method, req.path, err?.message || err);
+  if (!res.headersSent) {
+    res.status(err.status || 500).json({
+      error: isProd ? 'Internal server error' : (err.message || 'Unknown error'),
+      path: req.path,
+      method: req.method,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
 
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
