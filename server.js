@@ -3189,8 +3189,6 @@ app.get('/api/stats', async (req, res) => {
       agents: agentCount,
       humanVolumeUsdc: r2(volumeUsdc - agentVolumeUsdc - seedVolumeUsdc),
       agentVolumeUsdc: r2(agentVolumeUsdc),
-      seedTrades,
-      seedVolumeUsdc: r2(seedVolumeUsdc),
       nanopayments: { count: payCount, volumeUsdc: Math.round(nanoVolumeUsdc * 1e6) / 1e6 },
       protocolRevenueUsdc: Math.round(protocolRevenueUsdc * 1e6) / 1e6,
       takeRateBps: parseInt(process.env.PLATFORM_TAKE_RATE_BPS || '500', 10),
