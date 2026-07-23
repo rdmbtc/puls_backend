@@ -3144,22 +3144,29 @@ app.get('/api/stats', async (req, res) => {
       supabase.from('x402_payments').select('*', { count: 'exact', head: true }),
     ]);
     const tradeCount = countRes.count ?? 0;
-    // Supabase caps responses at 1000 rows — paginate the volume sum.
-    // Single pass also computes the humans-vs-agents split (same bucketing as the
-    // leaderboard: house agent, agent_* ids, or trades tagged "🤖 Agent:").
+    // Parallel pagination: fetch all trade pages at once instead of sequentially.
+    // With 22K trades at 1000/page = 22 pages, sequential took 15+ seconds.
+    // Parallel via Promise.all takes ~1-2s (one round-trip for all pages).
+    const tradePages = Math.ceil(tradeCount / 1000);
+    const tradePagePromises = [];
+    for (let p = 0; p < tradePages && p < 30; p++) { // cap at 30 pages (30K trades)
+      tradePagePromises.push(
+        supabase.from('trades')
+          .select('usdc_amount, user_id, question')
+          .eq('state', 'COMPLETE')
+          .order('created_at', { ascending: true })
+          .range(p * 1000, p * 1000 + 999)
+      );
+    }
+    const tradeResults = await Promise.all(tradePagePromises);
     let volumeUsdc = 0;
     let agentTrades = 0;
     let agentVolumeUsdc = 0;
     let seedTrades = 0;
     let seedVolumeUsdc = 0;
     const agentIds = new Set();
-    for (let from = 0; from < tradeCount; from += 1000) {
-      const { data: page } = await supabase
-        .from('trades')
-        .select('usdc_amount, user_id, question')
-        .eq('state', 'COMPLETE')
-        .range(from, from + 999);
-      if (!page || page.length === 0) break;
+    for (const { data: page } of tradeResults) {
+      if (!page || page.length === 0) continue;
       for (const r of page) {
         const amt = parseFloat(r.usdc_amount) || 0;
         volumeUsdc += amt;
@@ -3175,26 +3182,30 @@ app.get('/api/stats', async (req, res) => {
           seedVolumeUsdc += amt;
         }
       }
-      if (page.length < 1000) break;
     }
-    // Sum of nanopayment volume (x402 receipts are few — usually a single page).
-    // Also sum protocol revenue (take-rate from raw.treasuryFeeUsdc).
+    // Sum of nanopayment volume + protocol revenue — also parallel.
+    const payCount = payCountRes.count ?? 0;
+    const payPages = Math.ceil(payCount / 1000);
+    const payPagePromises = [];
+    for (let p = 0; p < payPages && p < 20; p++) {
+      payPagePromises.push(
+        supabase.from('x402_payments')
+          .select('amount_usdc, raw')
+          .order('created_at', { ascending: true })
+          .range(p * 1000, p * 1000 + 999)
+      );
+    }
+    const payResults = await Promise.all(payPagePromises);
     let nanoVolumeUsdc = 0;
     let protocolRevenueUsdc = 0;
-    const payCount = payCountRes.count ?? 0;
-    for (let from = 0; from < payCount; from += 1000) {
-      const { data: page } = await supabase
-        .from('x402_payments')
-        .select('amount_usdc, raw')
-        .range(from, from + 999);
-      if (!page || page.length === 0) break;
+    for (const { data: page } of payResults) {
+      if (!page || page.length === 0) continue;
       for (const r of page) {
         nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0;
         // Protocol revenue: take-rate fees stored in raw.treasuryFeeUsdc.
         const raw = typeof r.raw === 'string' ? JSON.parse(r.raw || '{}') : (r.raw || {});
         protocolRevenueUsdc += Number(raw.treasuryFeeUsdc || 0);
       }
-      if (page.length < 1000) break;
     }
     const r2 = (n) => Math.round(n * 100) / 100;
     const organicTrades = Math.max(0, tradeCount - seedTrades);
@@ -4246,6 +4257,37 @@ async function checkAndResolveMarkets() {
 
   for (const market of marketsToResolve) {
     try {
+      // Check on-chain state first — if the market is already resolved on-chain,
+      // mark it in our cache + DB and skip. This prevents "Already resolved"
+      // revert errors from spamming the logs on every cron tick.
+      if (market.contractAddress) {
+        try {
+          const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
+            address: market.contractAddress,
+            abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
+              outputs: [
+                { name: '_slug', type: 'string' },
+                { name: '_deadline', type: 'uint256' },
+                { name: '_resolved', type: 'bool' },
+                { name: '_outcome', type: 'bool' },
+                { name: '_yesOutstanding', type: 'uint256' },
+                { name: '_noOutstanding', type: 'uint256' }
+              ] }],
+            functionName: 'getMarketInfo'
+          });
+          if (resolvedOnChain) {
+            const entry = deployedMarketsCache.get(market.slug);
+            if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
+            await supabase.from('deployed_markets').update({ resolved: true, outcome: outcomeOnChain }).eq('slug', market.slug);
+            console.log(`[resolve] ${market.slug} already resolved on-chain (${outcomeOnChain ? 'YES' : 'NO'}) — marked in cache`);
+            continue;
+          }
+        } catch (e) {
+          // RPC might be down — continue to Polymarket check as fallback
+          console.warn(`[resolve] on-chain check failed for ${market.slug}: ${e.message}`);
+        }
+      }
+
       // Gamma's /markets?slug= returns ACTIVE markets only by default, so a
       // CLOSED/resolved market came back EMPTY — the cron then treated it as
       // "gone" and ARCHIVED it instead of resolving. The resilient client
@@ -4340,25 +4382,39 @@ async function checkAndResolveMarkets() {
 
       console.log(`Resolving on-chain market ${market.contractAddress} for slug ${market.slug} to outcome: ${outcome ? 'YES' : 'NO'}`);
 
-      const { request } = await publicClient.simulateContract({
-        account: adminAccount,
-        address: market.contractAddress,
-        abi: [
-          {
-            name: 'resolve',
-            type: 'function',
-            stateMutability: 'nonpayable',
-            inputs: [{ name: '_outcome', type: 'bool' }],
-            outputs: []
-          }
-        ],
-        functionName: 'resolve',
-        args: [outcome]
-      });
+      try {
+        const { request } = await publicClient.simulateContract({
+          account: adminAccount,
+          address: market.contractAddress,
+          abi: [
+            {
+              name: 'resolve',
+              type: 'function',
+              stateMutability: 'nonpayable',
+              inputs: [{ name: '_outcome', type: 'bool' }],
+              outputs: []
+            }
+          ],
+          functionName: 'resolve',
+          args: [outcome]
+        });
 
-      const hash = await walletClient.writeContract(request);
-      console.log(`Resolution Tx Hash: ${hash}`);
-      await publicClient.waitForTransactionReceipt({ hash });
+        const hash = await walletClient.writeContract(request);
+        console.log(`Resolution Tx Hash: ${hash}`);
+        await publicClient.waitForTransactionReceipt({ hash });
+      } catch (resolveErr) {
+        // If the market is already resolved on-chain, the contract reverts.
+        // Don't spam the error log — mark it as resolved and move on.
+        if (/already resolved/i.test(resolveErr.message || '') || /resolved/i.test(resolveErr.shortMessage || '')) {
+          console.log(`[resolve] ${market.slug} was already resolved on-chain — marking in cache`);
+          const entry = deployedMarketsCache.get(market.slug);
+          if (entry) { entry.resolved = true; entry.outcome = outcome; }
+          await supabase.from('deployed_markets').update({ resolved: true, outcome }).eq('slug', market.slug);
+          eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome });
+          continue;
+        }
+        throw resolveErr; // re-throw real errors
+      }
       
       await supabase
         .from('deployed_markets')
