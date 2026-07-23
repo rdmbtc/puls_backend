@@ -67,6 +67,22 @@ process.on('uncaughtException', (err, origin) => {
   // truly becomes unresponsive, but we give it a chance to recover.
 });
 
+// ── Interval manager: error-boundary wrapper for all cron jobs ──────────────
+// Must be defined BEFORE any safeInterval() calls (including the memory
+// sweep at line ~189). Collects all setInterval IDs for graceful shutdown.
+const intervalIds = [];
+function safeInterval(name, fn, ms) {
+  const id = setInterval(async () => {
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`[interval:${name}] error:`, e?.message || String(e));
+    }
+  }, ms);
+  intervalIds.push(id);
+  return id;
+}
+
 // Real rate limiters (previously no-ops). Tune via env if needed.
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -1074,23 +1090,6 @@ async function getOrDeployMarket(slug, deadlineSeconds) {
   });
 
   return promise;
-}
-
-// ── Interval manager: error-boundary wrapper for all cron jobs ──────────────
-// Collects all setInterval IDs so they can be cleared on graceful shutdown.
-// Wraps each callback in try/catch so a single throw doesn't silently kill
-// the interval (Node stops re-running it on uncaught exception).
-const intervalIds = [];
-function safeInterval(name, fn, ms) {
-  const id = setInterval(async () => {
-    try {
-      await fn();
-    } catch (e) {
-      console.error(`[interval:${name}] error:`, e?.message || String(e));
-    }
-  }, ms);
-  intervalIds.push(id);
-  return id;
 }
 
 // ── Supabase helpers ──────────────────────────────────────────────────────────
