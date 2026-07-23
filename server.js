@@ -1280,11 +1280,39 @@ async function getWalletInfo(walletId) {
       address = walletAddressCache.get(walletId);
     }
     if (!address) {
-      // Throttled Circle API call — prevents rate limit errors
-      const walletRes = await _circleThrottle(() => circle.getWallet({ id: walletId }));
-      address = walletRes.data.wallet.address;
-      walletAddressCache.set(walletId, address);
-      _walletAddrCache.set(walletId, { address, ts: Date.now() });
+      // Try Circle API with throttling — but if it rate limits, fall back
+      // to the last known address from Supabase (wallets table).
+      try {
+        const walletRes = await _circleThrottle(() => circle.getWallet({ id: walletId }));
+        address = walletRes.data.wallet.address;
+        walletAddressCache.set(walletId, address);
+        _walletAddrCache.set(walletId, { address, ts: Date.now() });
+        // Persist to Supabase so future cache misses can read from DB
+        // without hitting Circle API again.
+        supabase.from('wallets').update({ address }).eq('wallet_id', walletId)
+          .then(({ error }) => { if (error && !error.message.includes('column')) console.warn('[getWalletInfo] address persist:', error.message); })
+          .catch(() => {});
+      } catch (circleErr) {
+        // Circle API rate limited or failed — try DB fallback
+        if (/rate.?limit|429|too many/i.test(circleErr.message || '')) {
+          console.warn(`[getWalletInfo] Circle rate limited for ${walletId} — trying DB fallback`);
+          const { data: dbRow } = await supabase.from('wallets').select('address, wallet_address').eq('wallet_id', walletId).limit(1);
+          if (dbRow && dbRow.length > 0) {
+            address = dbRow[0].address || dbRow[0].wallet_address || null;
+          }
+        }
+        if (!address) {
+          // Last resort: check legacy cache
+          address = walletAddressCache.get(walletId);
+        }
+        if (!address) {
+          console.error(`[getWalletInfo] Could not resolve address for ${walletId}: ${circleErr.message}`);
+          return { walletId, address: '', usdcBalance: '0.00' };
+        }
+        // Cache the DB-fetched address too
+        _walletAddrCache.set(walletId, { address, ts: Date.now() });
+        walletAddressCache.set(walletId, address);
+      }
     }
 
     // Check balance cache first — avoids RPC calls on every roster fetch
@@ -4270,7 +4298,7 @@ async function archiveMarket(slug, reason) {
 }
 
 async function checkAndResolveMarkets() {
-  console.log('Running auto-resolution cron check...');
+  // Only log if there are markets to check (reduces log spam)
   const now = Math.floor(Date.now() / 1000);
   const archiveCutoff = now - ARCHIVE_AFTER_DAYS * 24 * 3600;
   
@@ -4282,11 +4310,10 @@ async function checkAndResolveMarkets() {
   }
 
   if (marketsToResolve.length === 0) {
-    console.log('No markets need resolution.');
-    return;
+    return; // silent — no spam when nothing to do
   }
 
-  console.log(`Found ${marketsToResolve.length} markets to check for resolution.`);
+  // Only log if there are markets to resolve
 
   for (const market of marketsToResolve) {
     try {
@@ -7338,7 +7365,7 @@ app.post('/api/agent/strategy', authenticateUser, requireVerifiedUser, async (re
 });
 
 async function runAgentStrategies() {
-  console.log('Running autonomous agent strategies loop...');
+  // Agent strategies run silently (reduces log spam)
   try {
     const { data: walletRows, error } = await supabase
       .from('wallets')
