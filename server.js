@@ -4834,20 +4834,25 @@ async function updateLeaderboard() {
           let currentVal = 0;
           if (resolved) {
             // For resolved markets: winning shares = $1 each, losing shares = $0.
-            // PnL = (received + winningShares) - totalPaid
-            // totalPaid already includes both yesPaid + noPaid (losing side is a loss).
+            // Prefer on-chain position (yesShares/noShares from getUserPosition).
+            // Fall back to trade-derived shares if on-chain read failed.
             if (outcome === true) {
-              // YES won — YES shares pay out 1:1, NO shares worthless
-              currentVal = mp.yesPaid > 0 ? (mp.yesPaid / (mp.yesEntryPrice || 0.5)) : 0;
+              // YES won — YES shares pay out 1:1
+              if (yesShares > 0) currentVal = yesShares;
+              else currentVal = mp.yesPaid > 0 ? (mp.yesPaid / (mp.yesEntryPrice || 0.5)) : 0;
             } else if (outcome === false) {
-              // NO won — NO shares pay out 1:1, YES shares worthless
-              currentVal = mp.noPaid > 0 ? (mp.noPaid / (mp.noEntryPrice || 0.5)) : 0;
+              // NO won — NO shares pay out 1:1
+              if (noShares > 0) currentVal = noShares;
+              else currentVal = mp.noPaid > 0 ? (mp.noPaid / (mp.noEntryPrice || 0.5)) : 0;
             } else {
               // outcome unknown — can't determine winner, skip PnL
               resolved = false;
             }
             if (resolved) resolvedMarketsCount++;
             
+            // PnL = (sell proceeds + winning shares value) - total cost of buys
+            // If agent sold some shares, received > 0 and remaining shares are net.
+            // currentVal already reflects the winning side's share count.
             const marketPnL = (mp.received + currentVal) - mp.paid;
             if (marketPnL > 0.05) {
               winningMarketsCount++;
