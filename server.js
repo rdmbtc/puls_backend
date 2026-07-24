@@ -4711,10 +4711,16 @@ async function updateLeaderboard() {
         if (t.market_id) s.markets.add(t.market_id);
         // Track per-market paid/received for PnL calculation
         if (t.market_id) {
-          if (!s.marketPnL.has(t.market_id)) s.marketPnL.set(t.market_id, { paid: 0, received: 0 });
+          if (!s.marketPnL.has(t.market_id)) s.marketPnL.set(t.market_id, { paid: 0, received: 0, yesPaid: 0, noPaid: 0, yesEntryPrice: 0.5, noEntryPrice: 0.5, yesCount: 0, noCount: 0 });
           const mp = s.marketPnL.get(t.market_id);
-          if (amt > 0) mp.paid += amt;
-          else if (amt < 0) mp.received += Math.abs(amt);
+          if (amt > 0) {
+            mp.paid += amt;
+            const price = parseFloat(t.entry_price) || 0.5;
+            if (t.side === 'YES') { mp.yesPaid += amt; mp.yesEntryPrice = (mp.yesEntryPrice * mp.yesCount + price) / (mp.yesCount + 1); mp.yesCount++; }
+            else if (t.side === 'NO') { mp.noPaid += amt; mp.noEntryPrice = (mp.noEntryPrice * mp.noCount + price) / (mp.noCount + 1); mp.noCount++; }
+          } else if (amt < 0) {
+            mp.received += Math.abs(amt);
+          }
         }
       }
       if (!data || data.length < PAGE) break; // last page
@@ -4759,6 +4765,32 @@ async function updateLeaderboard() {
             outcome = cached.outcome;
           }
           
+          // If cache says resolved but outcome is null/undefined (stale DB row),
+          // read outcome from chain — otherwise PnL is wrong because we can't
+          // determine which side won.
+          if (resolved && (outcome === null || outcome === undefined)) {
+            try {
+              const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
+                address: marketAddress,
+                abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
+                  outputs: [
+                    { name: '_slug', type: 'string' },
+                    { name: '_deadline', type: 'uint256' },
+                    { name: '_resolved', type: 'bool' },
+                    { name: '_outcome', type: 'bool' },
+                    { name: '_yesOutstanding', type: 'uint256' },
+                    { name: '_noOutstanding', type: 'uint256' }
+                  ] }],
+                functionName: 'getMarketInfo'
+              });
+              if (resolvedOnChain) {
+                resolved = true;
+                outcome = outcomeOnChain;
+                if (cached) cached.outcome = outcomeOnChain;
+              }
+            } catch (_) { /* chain read failed — keep null outcome */ }
+          }
+          
           let yesShares = 0;
           let noShares = 0;
           let claimed = false;
@@ -4801,12 +4833,23 @@ async function updateLeaderboard() {
           
           let currentVal = 0;
           if (resolved) {
-            // For resolved markets, the "current value" = received (sells) +
-            // any winning position value. Without per-side breakdown, use
-            // a simple heuristic: if the market resolved, the user's PnL
-            // is (received - paid) as a rough estimate.
-            currentVal = mp.received; // approximate
-            resolvedMarketsCount++;
+            // For resolved markets, currentVal = value of winning shares.
+            // outcome: true=YES wins, false=NO wins. mp.yesPaid/mp.noPaid track
+            // how much was spent on each side. Winning side shares are worth
+            // their share count (1 USDC each at resolution).
+            if (outcome === true) {
+              // YES won — YES shares pay out 1:1
+              const yesShares = mp.yesPaid > 0 ? (mp.yesPaid / (mp.yesEntryPrice || 0.5)) : 0;
+              currentVal = yesShares - mp.noPaid; // NO shares worthless
+            } else if (outcome === false) {
+              // NO won — NO shares pay out 1:1
+              const noShares = mp.noPaid > 0 ? (mp.noPaid / (mp.noEntryPrice || 0.5)) : 0;
+              currentVal = noShares - mp.yesPaid; // YES shares worthless
+            } else {
+              // outcome unknown — can't determine winner, skip PnL
+              resolved = false;
+            }
+            if (resolved) resolvedMarketsCount++;
             
             const marketPnL = (mp.received + currentVal) - mp.paid;
             if (marketPnL > 0.05) {
@@ -4921,6 +4964,16 @@ function scheduleLeaderboardRebuild() {
   }, 10_000).unref?.();
 }
 eventBus.on(EVENTS.TRADE_COMPLETE, () => scheduleLeaderboardRebuild());
+
+// Manual refresh endpoint — triggers updateLeaderboard immediately
+app.get('/api/refresh-leaderboard', async (req, res) => {
+  try {
+    await updateLeaderboard();
+    res.json({ ok: true, message: 'Leaderboard updated' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // In-memory leaderboard cache (60s TTL) to avoid Supabase rate limits
 const leaderboardCache = new Map(); // key: "sort:limit" → { data, ts }
