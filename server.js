@@ -7029,21 +7029,6 @@ const io = initSocketIo(server);
 // WS, not Socket.IO. Keep them working; they consume TRADE_COMPLETE frames.
 const rawWs = initRawWs(server);
 
-// ── WebSocket ping/pong keepalive ───────────────────────────────────────────
-// Prevents H15 "Idle connection" errors by sending pings every 30s.
-// Dead connections are terminated and removed from the client set.
-const wsPingInterval = safeInterval('wsPing', () => {
-  for (const client of wsClients) {
-    if (client.isAlive === false) {
-      client.terminate();
-      wsClients.delete(client);
-      continue;
-    }
-    client.isAlive = false;
-    try { client.ping(); } catch {}
-  }
-}, 30_000);
-
 function broadcastTrade(trade) {
   // Fan out to the internal event bus → cache + agents + Socket.IO gateway
   // + raw `ws` gateway all react. broadcastTrade is only called for COMPLETE
