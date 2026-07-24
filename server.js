@@ -4833,18 +4833,15 @@ async function updateLeaderboard() {
           
           let currentVal = 0;
           if (resolved) {
-            // For resolved markets, currentVal = value of winning shares.
-            // outcome: true=YES wins, false=NO wins. mp.yesPaid/mp.noPaid track
-            // how much was spent on each side. Winning side shares are worth
-            // their share count (1 USDC each at resolution).
+            // For resolved markets: winning shares = $1 each, losing shares = $0.
+            // PnL = (received + winningShares) - totalPaid
+            // totalPaid already includes both yesPaid + noPaid (losing side is a loss).
             if (outcome === true) {
-              // YES won — YES shares pay out 1:1
-              const yesShares = mp.yesPaid > 0 ? (mp.yesPaid / (mp.yesEntryPrice || 0.5)) : 0;
-              currentVal = yesShares - mp.noPaid; // NO shares worthless
+              // YES won — YES shares pay out 1:1, NO shares worthless
+              currentVal = mp.yesPaid > 0 ? (mp.yesPaid / (mp.yesEntryPrice || 0.5)) : 0;
             } else if (outcome === false) {
-              // NO won — NO shares pay out 1:1
-              const noShares = mp.noPaid > 0 ? (mp.noPaid / (mp.noEntryPrice || 0.5)) : 0;
-              currentVal = noShares - mp.yesPaid; // YES shares worthless
+              // NO won — NO shares pay out 1:1, YES shares worthless
+              currentVal = mp.noPaid > 0 ? (mp.noPaid / (mp.noEntryPrice || 0.5)) : 0;
             } else {
               // outcome unknown — can't determine winner, skip PnL
               resolved = false;
