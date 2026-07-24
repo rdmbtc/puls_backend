@@ -55,7 +55,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // CRITICAL: Catch synchronous throws that would otherwise crash the process.
-// Node defaults to exiting on uncaughtException Ú¿‘ we override that so a
+// Node defaults to exiting on uncaughtException  we override that so a
 // single sync error in a callback doesn't kill the server and drop all
 // active trades + WebSocket connections.
 process.on('uncaughtException', (err, origin) => {
@@ -63,7 +63,7 @@ process.on('uncaughtException', (err, origin) => {
   console.error('[UNCAUGHT EXCEPTION]', origin, msg);
   if (err?.stack) console.error(err.stack);
   captureException(err instanceof Error ? err : new Error(msg));
-  // Do NOT exit Ú¿‘ log and continue. Heroku will restart if the process
+  // Do NOT exit  log and continue. Heroku will restart if the process
   // truly becomes unresponsive, but we give it a chance to recover.
 });
 
@@ -101,17 +101,17 @@ const activateMarketLimiter = rateLimit({
 });
 
 const app = express();
-// Behind a reverse proxy (nginx/caddy on the VPS) Ú¿‘ trust the first hop so
+// Behind a reverse proxy (nginx/caddy on the VPS)  trust the first hop so
 // express-rate-limit keys on the real client IP instead of the proxy IP.
 app.set('trust proxy', 1);
 
-// gzip-compress all responses Ú¿‘ a big win for JSON API payloads (markets,
+// gzip-compress all responses  a big win for JSON API payloads (markets,
 // signals, feed). Registered early so every downstream route benefits. Clients
 // can opt out with an `x-no-compression` header.
-// Compress responses Ú¿‘ but skip the AI chat endpoints. Their replies are a
-// single small JSON; sending them with a fixed Content-Length (not gzipÚ∆“chunked)
+// Compress responses  but skip the AI chat endpoints. Their replies are a
+// single small JSON; sending them with a fixed Content-Length (not gzipchunked)
 // is delivered far more predictably through Cloudflare (chunked chat replies were
-// intermittently reset at the edge Ú∆“ client saw a 000/empty reply).
+// intermittently reset at the edge  client saw a 000/empty reply).
 app.use(compression({
   filter: (req, res) => {
     if (req.path === '/api/copilot/chat' || req.path === '/api/agent/chat' || req.path === '/api/oracle/ask') return false;
@@ -121,7 +121,7 @@ app.use(compression({
 
 // Short-lived edge/browser cache for PUBLIC, non-user-specific GETs so a CDN
 // (Cloudflare) serves them from the edge and the 1-vCPU origin is offloaded.
-// Allowlist only Ú¿‘ never matches authed/user-varying routes (wallet, copy,
+// Allowlist only  never matches authed/user-varying routes (wallet, copy,
 // points/me, signals, comments, support, alpha/:id). Non-200s aren't cached by
 // Cloudflare, and config rules are listed before the broader :id rule.
 const PUBLIC_CACHE_RULES = [
@@ -156,8 +156,8 @@ app.use((req, res, next) => {
       }
     }
     // Everything else (trade status polling, wallet, portfolio, notifications,
-    // agent status, Ú¿Ê) MUST NOT be cached by the CDN. Without this, Cloudflare
-    // caches the first 200 and serves it on every poll Ú¿‘ e.g. /api/trade/status
+    // agent status, ) MUST NOT be cached by the CDN. Without this, Cloudflare
+    // caches the first 200 and serves it on every poll  e.g. /api/trade/status
     // returns a stale INITIATED/SENT forever, so a trade that actually
     // completed on-chain shows "Processing" then "Trade Failed".
     if (!cacheable) res.set('Cache-Control', 'no-store');
@@ -178,21 +178,45 @@ app.use(allowedOrigins.length ? cors({ origin: allowedOrigins }) : cors());
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // Lightweight liveness probe (no DB, no rate-limit) for uptime monitors and
-// Lightweight event-loop lag meter Ú¿‘ proves whether the box is actually working.
+// Lightweight event-loop lag meter  proves whether the box is actually working.
 let __elLagMs = 0;
 { let _last = Date.now(); const _t = setInterval(() => { const now = Date.now(); __elLagMs = Math.max(0, now - _last - 1000); _last = now; }, 1000); if (_t.unref) _t.unref(); }
 
 // Memory pressure relief: every 5 minutes, clear caches that grow over time.
-// This is the safety net for the 512MB Heroku dyno Ú¿‘ the caches have their
+// This is the safety net for the 512MB Heroku dyno  the caches have their
 // own caps, but this sweep catches anything that slipped through (e.g. entries
 // with future timestamps, or caches added in future code that don't have caps).
 setInterval(() => {
   try {
-    if (typeof rpcCache !== 'undefined' && rpcCache.size > 500) {
+    if (typeof rpcCache !== 'undefined' && rpcCache.size > 300) {
       rpcCache.clear();
     }
-    if (typeof _balanceCache !== 'undefined' && _balanceCache.size > 200) {
+    if (typeof _balanceCache !== 'undefined' && _balanceCache.size > 150) {
       _balanceCache.clear();
+    }
+    if (typeof insightCache !== 'undefined' && insightCache.size > 50) {
+      insightCache.clear();
+    }
+    if (typeof _explorerCache !== 'undefined' && _explorerCache.size > 50) {
+      _explorerCache.clear();
+    }
+    if (typeof leaderboardCache !== 'undefined' && leaderboardCache.size > 20) {
+      leaderboardCache.clear();
+    }
+    if (typeof userTrades !== 'undefined' && userTrades.size > 100) {
+      userTrades.clear();
+    }
+    if (typeof marketTrades !== 'undefined' && marketTrades.size > 100) {
+      marketTrades.clear();
+    }
+    if (typeof llmHeavyCooldown !== 'undefined' && llmHeavyCooldown.size > 0) {
+      llmHeavyCooldown.clear();
+    }
+    if (typeof deployedMarketsCache !== 'undefined' && deployedMarketsCache.size > 2000) {
+      const keys = Array.from(deployedMarketsCache.keys());
+      for (let i = 0; i < keys.length - 1000; i++) {
+        deployedMarketsCache.delete(keys[i]);
+      }
     }
     // Force GC if available (--expose-gc flag or Node with V8 inspector)
     if (typeof global.gc === 'function') global.gc();
@@ -228,7 +252,7 @@ app.use(generalLimiter); // Apply general rate limit globally
 app.use(requestId);      // Generate/propagate x-request-id for log correlation
 app.use(sentryRequestHandler); // Sentry performance + error instrumentation
 
-// Ú‘¿Ú‘¿ Request timeout middleware Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Request timeout middleware 
 // Prevents hung endpoints from consuming a connection forever. Trade endpoints
 // get 60s (on-chain settlement can be slow); everything else gets 30s.
 app.use((req, res, next) => {
@@ -242,7 +266,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Ú‘¿Ú‘¿ asyncHandler: wrap async route handlers so uncaught rejections hit the Ú‘¿Ú‘¿
+//  asyncHandler: wrap async route handlers so uncaught rejections hit the 
 // global error handler instead of crashing the process or hanging the request.
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -259,7 +283,7 @@ const authenticateUser = async (req, res, next) => {
 
     // Web3/MetaMask users sign their own transactions on-chain and only need
     // read access here. They are NOT verified (no JWT, no signature), so mark
-    // the request as a web3 guest Ú¿‘ endpoints that operate Circle wallets must
+    // the request as a web3 guest  endpoints that operate Circle wallets must
     // additionally use `requireVerifiedUser` to reject these requests.
     // TODO: replace this with SIWE (signed-message) verification for full write access.
     if (requestedUserId && (requestedUserId.startsWith('0x') || requestedUserId.startsWith('eth_0x'))) {
@@ -273,7 +297,7 @@ const authenticateUser = async (req, res, next) => {
     }
     const token = authHeader.split(' ')[1];
     // Decoded JWT payloads (user id, email, etc.) must never be logged to
-    // stdout Ú¿‘ Heroku logs are retained and visible to anyone with dashboard
+    // stdout  Heroku logs are retained and visible to anyone with dashboard
     // access. This block previously dumped the full header + payload on every
     // authenticated request. Use DEBUG_AUTH=true locally if you need to inspect
     // a token during development.
@@ -339,8 +363,8 @@ const requireVerifiedUser = (req, res, next) => {
   next();
 };
 
-// Accepts a Puls API key (pk_live_Ú¿Ê) OR falls back to the normal Supabase-JWT
-// auth. Only applied to the handful of routes the Puls CLI needs Ú¿‘ the shared
+// Accepts a Puls API key (pk_live_) OR falls back to the normal Supabase-JWT
+// auth. Only applied to the handful of routes the Puls CLI needs  the shared
 // `authenticateUser` is left untouched, so every other endpoint is unaffected.
 // On a valid key we mirror authenticateUser's contract (set req.user + force
 // req.body/query.userId to the key owner). Any key error falls through to JWT.
@@ -429,7 +453,7 @@ async function pingIndexNow(urls) {
 }
 
 // Serve the IndexNow key file so search engines can verify ownership.
-// Without this, IndexNow pings return 403 (key not found) Ú∆“ 0 pages indexed.
+// Without this, IndexNow pings return 403 (key not found)  0 pages indexed.
 app.get('/51e360e20e504c2ea2d600490b41c099.txt', (req, res) => {
   res.set('Content-Type', 'text/plain');
   res.set('Cache-Control', 'public, max-age=86400');
@@ -443,18 +467,18 @@ const supabaseAnon = createClient(
 
 const USDC = '0x3600000000000000000000000000000000000000';
 
-// Ú‘¿Ú‘¿ Circle API Circuit Breaker Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Circle API Circuit Breaker 
 // After 5 consecutive failures, stops calling Circle for 60s to avoid
 // cascading rate-limit / outage spirals. Resets on any success.
 const circleBreaker = {
   failures: 0,
   openUntil: 0,
-  record() { this.failures++; if (this.failures >= 5) { this.openUntil = Date.now() + 60000; console.warn(`[circleBreaker] OPEN Ú¿‘ 5 failures, pausing Circle calls for 60s`); } },
+  record() { this.failures++; if (this.failures >= 5) { this.openUntil = Date.now() + 60000; console.warn(`[circleBreaker] OPEN  5 failures, pausing Circle calls for 60s`); } },
   reset() { this.failures = 0; this.openUntil = 0; },
   isOpen() { return Date.now() < this.openUntil; },
 };
 
-// Ú‘¿Ú‘¿ Supabase retry helper Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Supabase retry helper 
 // Retries a Supabase query up to `retries` times with exponential backoff.
 // Use for critical queries where a transient Supabase hiccup shouldn't 500.
 async function supabaseRetry(fn, retries = 3) {
@@ -470,12 +494,12 @@ async function supabaseRetry(fn, retries = 3) {
 let walletSetId = (process.env.WALLET_SET_ID || '').trim();
 
 // Wallet account type for newly created user wallets.
-//   SCA = ERC-4337 smart contract account Ú∆“ eligible for Circle Gas Station
+//   SCA = ERC-4337 smart contract account  eligible for Circle Gas Station
 //         (gasless). Arc Testnet has a preconfigured Gas Station policy, so new
 //         users transact with ZERO balance and we no longer depend on the
 //         admin-treasury USDC drip for gas.
 //   EOA = legacy externally-owned account (needs gas/USDC funding to transact).
-// Existing wallets keep whatever type they were created with Ú¿‘ `get-or-create`
+// Existing wallets keep whatever type they were created with  `get-or-create`
 // returns the stored wallet untouched, so this only affects brand-new users.
 const WALLET_ACCOUNT_TYPE = (process.env.WALLET_ACCOUNT_TYPE || 'SCA').trim().toUpperCase() === 'EOA' ? 'EOA' : 'SCA';
 console.log(`[Wallets] New user wallets will be created as ${WALLET_ACCOUNT_TYPE}${WALLET_ACCOUNT_TYPE === 'SCA' ? ' (gasless via Circle Gas Station)' : ' (legacy, requires gas funding)'}`);
@@ -514,7 +538,7 @@ async function getTreasuryUsdcBalance() {
   }
 }
 
-// Ú‘¿Ú‘¿ Low-balance alerting Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Low-balance alerting 
 // When the treasury drops below TREASURY_MIN_USDC we log a loud, actionable
 // warning and (if ALERT_WEBHOOK_URL is set) POST a message to a Slack-compatible
 // incoming webhook so funding never silently dies mid-demo again.
@@ -584,12 +608,12 @@ const FACTORY_ABI = [
   }
 ];
 
-// Ú‘¿Ú‘¿ UMA Optimistic Oracle V2 resolution (PR 3) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  UMA Optimistic Oracle V2 resolution (PR 3) 
 // When UMA_RESOLUTION=true, newly deployed markets are owned by the
 // UMAResolverAdapter and resolved through UMA's Optimistic Oracle V2:
 //   1. cron opens a price request after the deadline (anyone could too),
 //   2. cron proposes the Polymarket consensus outcome (posting a USDC bond),
-//   3. after the liveness window passes undisputed, cron settles Ú∆“ market resolves.
+//   3. after the liveness window passes undisputed, cron settles  market resolves.
 // Markets NOT registered with the adapter (e.g. created before the flag was
 // flipped) automatically fall back to the legacy direct-resolve path.
 const UMA_RESOLUTION = (process.env.UMA_RESOLUTION || 'false').toLowerCase() === 'true';
@@ -702,9 +726,9 @@ async function ensureOoAllowance(minAmount) {
 }
 
 // Drive one market through the UMA state machine. Returns:
-//   'fallback' Ú¿” not registered with the adapter Ú∆“ use legacy direct resolve
-//   'pending'  Ú¿” waiting on a future cron tick (proposal/liveness/dispute)
-//   'resolved' Ú¿” market.resolve() executed on-chain via the adapter
+//   'fallback'  not registered with the adapter  use legacy direct resolve
+//   'pending'   waiting on a future cron tick (proposal/liveness/dispute)
+//   'resolved'  market.resolve() executed on-chain via the adapter
 async function processUmaMarket(market, outcome) {
   const res = await getUmaResolution(market.contractAddress);
   if (!res.registered) return 'fallback';
@@ -750,7 +774,7 @@ async function processUmaMarket(market, outcome) {
   }
 
   if (state === 'Disputed') {
-    console.warn(`[UMA] ${market.slug}: proposal DISPUTED Ú¿‘ waiting for DVM/oracle decision`);
+    console.warn(`[UMA] ${market.slug}: proposal DISPUTED  waiting for DVM/oracle decision`);
     return 'pending';
   }
 
@@ -774,7 +798,7 @@ async function processUmaMarket(market, outcome) {
   return 'pending';
 }
 
-// Ú‘¿Ú‘¿ Cache of Deployed Markets Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Cache of Deployed Markets 
 const deployedMarketsCache = new Map(); // slug -> { contractAddress, deadline, resolved, outcome }
 const contractToSlugCache = new Map(); // contractAddress -> slug
 
@@ -820,8 +844,8 @@ const MARKET_EVENTS_ABI = [
   }
 ];
 
-// Ú‘¿Ú‘¿ Cache of User Wallets Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
-// Wallet address caches Ú¿‘ capped to prevent unbounded growth on long-running
+//  Cache of User Wallets 
+// Wallet address caches  capped to prevent unbounded growth on long-running
 // dynos. Entries are never individually evicted (they're small and stable), but
 // the hard cap prevents pathological growth from transient wallet addresses.
 const WALLET_CACHE_MAX = 2000;
@@ -904,7 +928,7 @@ const pendingDeployments = new Map();
 let deploymentQueue = Promise.resolve();
 
 // LMSR liquidity parameter b (in USDC) seeded into every new market at deploy.
-// initialCost = bT¨ln2 is pulled from the treasury per market, so this is the
+// initialCost = bTln2 is pulled from the treasury per market, so this is the
 // single biggest treasury cost. Env-tunable (default 10); lower = cheaper seed
 // but thinner liquidity (a bit more price slippage per trade).
 const MARKET_LIQUIDITY_B_USDC = Math.max(1, parseFloat(process.env.MARKET_LIQUIDITY_B) || 10);
@@ -957,7 +981,7 @@ async function _executeMarketDeployment(slug, deadlineSeconds) {
       args: [FACTORY_ADDRESS, MAX]
     });
     await publicClient.waitForTransactionReceipt({ hash: approveHash });
-    console.log(`Ú‹≈ Approved factory for MaxUint256 USDC`);
+    console.log(` Approved factory for MaxUint256 USDC`);
   }
 
   // Check deployer USDC balance before attempting deployment
@@ -974,7 +998,7 @@ async function _executeMarketDeployment(slug, deadlineSeconds) {
     args: [adminAccount.address]
   });
   if (BigInt(deployerBalance) < initialCost) {
-    console.warn(`Ú⁄‡ˇ¨œ  Deployer USDC balance (${deployerBalance}) < required (${initialCost}) Ú¿‘ skipping deployment for ${slug}`);
+    console.warn(`  Deployer USDC balance (${deployerBalance}) < required (${initialCost})  skipping deployment for ${slug}`);
     throw new Error(`Deployer has insufficient USDC (${deployerBalance} < ${initialCost}) to deploy market ${slug}`);
   }
 
@@ -999,7 +1023,7 @@ async function _executeMarketDeployment(slug, deadlineSeconds) {
   const deployedAddress = allM[allM.length - 1];
   if (!deployedAddress) throw new Error('Failed to retrieve deployed market address from factory');
 
-  console.log(`Ú‹≈ Successfully deployed LMSRMarket at ${deployedAddress} for slug ${slug}`);
+  console.log(` Successfully deployed LMSRMarket at ${deployedAddress} for slug ${slug}`);
 
   if (UMA_RESOLUTION && UMA_ADAPTER_ADDRESS) {
     try {
@@ -1044,12 +1068,12 @@ async function getOrDeployMarket(slug, deadlineSeconds) {
   let cached = deployedMarketsCache.get(slug);
   if (cached) return cached.contractAddress;
 
-  // Guard: never try to deploy a market whose deadline already passed Ú¿‘ the
+  // Guard: never try to deploy a market whose deadline already passed  the
   // factory reverts with "Deadline in past", wasting an RPC round-trip and
   // spamming the error log. Require at least 5 minutes of remaining lifetime.
   const nowSec = Math.floor(Date.now() / 1000);
   if (!deadlineSeconds || Number(deadlineSeconds) <= nowSec + 300) {
-    throw new Error(`Market ${slug} deadline ${deadlineSeconds} is in the past (or <5min away) Ú¿‘ skipping deployment`);
+    throw new Error(`Market ${slug} deadline ${deadlineSeconds} is in the past (or <5min away)  skipping deployment`);
   }
 
   if (pendingDeployments.has(slug)) {
@@ -1078,7 +1102,7 @@ async function getOrDeployMarket(slug, deadlineSeconds) {
   return promise;
 }
 
-// Ú‘¿Ú‘¿ Interval manager: error-boundary wrapper for all cron jobs Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Interval manager: error-boundary wrapper for all cron jobs 
 // Collects all setInterval IDs so they can be cleared on graceful shutdown.
 // Wraps each callback in try/catch so a single throw doesn't silently kill
 // the interval (Node stops re-running it on uncaught exception).
@@ -1095,13 +1119,13 @@ function safeInterval(name, fn, ms) {
   return id;
 }
 
-// Ú‘¿Ú‘¿ Supabase helpers Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Supabase helpers 
 
 async function getWalletId(userId) {
   // Cache-first: the wallets slice is hydrated at boot and kept in sync by
   // WALLET_CREATED events. Falls back to a one-time Supabase read on a miss
   // (e.g., a wallet created before this process started whose row wasn't in
-  // the boot snapshot Ú¿‘ shouldn't happen, but stays correct if it does).
+  // the boot snapshot  shouldn't happen, but stays correct if it does).
   const cached = cache.walletByUser(userId);
   if (cached && cached.wallet_id) return cached.wallet_id;
   const { data } = await supabase
@@ -1116,7 +1140,7 @@ async function saveWallet(userId, walletId) {
   const { error } = await supabase.from('wallets').upsert({ user_id: userId, wallet_id: walletId });
   if (error) {
     // CRITICAL: if this fails, the wallet exists in Circle but NOT in the DB.
-    // On next restart, getWalletId returns null Ú∆“ creates ANOTHER wallet Ú∆“
+    // On next restart, getWalletId returns null  creates ANOTHER wallet 
     // agent address changes every restart. Log loudly so it's caught.
     console.error(`[saveWallet] CRITICAL: upsert failed for ${userId}:`, error.message);
   }
@@ -1161,13 +1185,13 @@ async function isApproved(walletId, contractAddress) {
 async function saveTrade(userId, trade) {
   const { data, error } = await supabase.from('trades').insert({ user_id: userId, ...trade }).select().single();
   if (error) {
-    // CRITICAL: Circle transfer already succeeded Ú¿‘ the trade exists on-chain
+    // CRITICAL: Circle transfer already succeeded  the trade exists on-chain
     // but NOT in the DB. Log loudly so it can be reconciled manually.
     // Retry once (transient Supabase errors are common on the free tier).
     console.error('[saveTrade] CRITICAL: DB insert failed after Circle transfer succeeded:', error.message, { userId, tx_id: trade.tx_id });
     const { data: retry, error: err2 } = await supabase.from('trades').insert({ user_id: userId, ...trade }).select().single();
     if (err2) {
-      console.error('[saveTrade] RETRY ALSO FAILED Ú¿‘ trade lost on-chain:', err2.message);
+      console.error('[saveTrade] RETRY ALSO FAILED  trade lost on-chain:', err2.message);
       return null;
     }
     if (retry) {
@@ -1222,7 +1246,7 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
       console.log(`[QuickNode Webhook] Synced initiated trade ID ${trade.id} to COMPLETE`);
       createNotification(
         userId,
-        'Trade Confirmed Ú⁄·',
+        'Trade Confirmed ',
         `Successfully ${amountUsdc > 0 ? 'bought' : 'sold'} $${amount.toFixed(2)} of ${side} shares for "${question}"`,
         'trade'
       ).catch(console.error);
@@ -1275,7 +1299,7 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
       console.log(`[QuickNode Webhook] Inserted new completed trade for tx ${txHash}`);
       createNotification(
         userId,
-        'Trade Confirmed Ú⁄·',
+        'Trade Confirmed ',
         `Successfully ${amountUsdc > 0 ? 'bought' : 'sold'} $${amount.toFixed(2)} of ${side} shares for "${question || 'Prediction Market'}"`,
         'trade'
       ).catch(console.error);
@@ -1296,7 +1320,7 @@ async function getTrades(userIds) {
   return data ?? [];
 }
 
-// Ú‘¿Ú‘¿ Wallet Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Wallet 
 
 async function ensureWalletSet() {
   if (walletSetId) return walletSetId;
@@ -1308,12 +1332,12 @@ async function ensureWalletSet() {
 
 const walletAddressCache = new Map();
 
-// Balance cache: { address -> { balance, exact, ts } } Ú¿‘ avoids hitting the RPC
+// Balance cache: { address -> { balance, exact, ts } }  avoids hitting the RPC
 // on every /api/agents/roster call (which fetches 6+ wallets).  Bounded: a
 // periodic sweep evicts expired entries so the Map can't grow unbounded on a
 // long-running dyno (512MB Heroku).
 const _balanceCache = new Map();
-const BALANCE_CACHE_TTL_MS = 15_000; // 15s Ú¿‘ fresh enough for UI
+const BALANCE_CACHE_TTL_MS = 15_000; // 15s  fresh enough for UI
 const BALANCE_CACHE_MAX = 500; // hard cap (distinct wallet addresses)
 
 // Periodic sweep: evict expired balance-cache entries every 60s so the Map
@@ -1326,10 +1350,10 @@ setInterval(() => {
   }
 }, 60_000).unref?.();
 
-// Wallet address cache: { walletId -> { address, ts } } Ú¿‘ 5 min TTL.
+// Wallet address cache: { walletId -> { address, ts } }  5 min TTL.
 // Prevents repeated Circle API calls for the same wallet address.
 const _walletAddrCache = new Map();
-const WALLET_ADDR_TTL_MS = 5 * 60 * 1000; // 5 min Ú¿‘ wallet addresses don't change
+const WALLET_ADDR_TTL_MS = 5 * 60 * 1000; // 5 min  wallet addresses don't change
 // Circle API semaphore: max 2 concurrent Circle API calls to avoid rate limits.
 let _circleInFlight = 0;
 const _circleQueue = [];
@@ -1350,7 +1374,7 @@ async function _circleThrottle(fn) {
 
 async function getWalletInfo(walletId) {
   try {
-    // Check wallet address cache (5 min TTL) Ú¿‘ avoids Circle API call entirely
+    // Check wallet address cache (5 min TTL)  avoids Circle API call entirely
     let address = null;
     const addrCached = _walletAddrCache.get(walletId);
     if (addrCached && Date.now() - addrCached.ts < WALLET_ADDR_TTL_MS) {
@@ -1361,7 +1385,7 @@ async function getWalletInfo(walletId) {
       address = walletAddressCache.get(walletId);
     }
     if (!address) {
-      // Try Circle API with throttling Ú¿‘ but if it rate limits, fall back
+      // Try Circle API with throttling  but if it rate limits, fall back
       // to the last known address from Supabase (wallets table).
       try {
         const walletRes = await _circleThrottle(() => circle.getWallet({ id: walletId }));
@@ -1374,9 +1398,9 @@ async function getWalletInfo(walletId) {
           .then(({ error }) => { if (error && !error.message.includes('column')) console.warn('[getWalletInfo] address persist:', error.message); })
           .catch(() => {});
       } catch (circleErr) {
-        // Circle API rate limited or failed Ú¿‘ try DB fallback
+        // Circle API rate limited or failed  try DB fallback
         if (/rate.?limit|429|too many/i.test(circleErr.message || '')) {
-          console.warn(`[getWalletInfo] Circle rate limited for ${walletId} Ú¿‘ trying DB fallback`);
+          console.warn(`[getWalletInfo] Circle rate limited for ${walletId}  trying DB fallback`);
           const { data: dbRow } = await supabase.from('wallets').select('address, wallet_address').eq('wallet_id', walletId).limit(1);
           if (dbRow && dbRow.length > 0) {
             address = dbRow[0].address || dbRow[0].wallet_address || null;
@@ -1396,7 +1420,7 @@ async function getWalletInfo(walletId) {
       }
     }
 
-    // Check balance cache first Ú¿‘ avoids RPC calls on every roster fetch
+    // Check balance cache first  avoids RPC calls on every roster fetch
     const cached = _balanceCache.get(address);
     if (cached && Date.now() - cached.ts < BALANCE_CACHE_TTL_MS) {
       return { walletId, address, usdcBalance: cached.balance, exactUsdcBalance: cached.exact };
@@ -1449,7 +1473,7 @@ async function getWalletInfo(walletId) {
     } catch (err) {
       console.warn(`On-chain balance check failed for ${address}:`, err.message);
       // FALLBACK: try the public Arc RPC directly (the Canteen RPC node can
-      // be stale Ú¿‘ it sometimes lags behind the canonical chain state by
+      // be stale  it sometimes lags behind the canonical chain state by
       // hours or days, showing wrong balances to users).
       try {
         const fallbackRpc = 'https://rpc.testnet.arc.network';
@@ -1495,7 +1519,7 @@ async function getWalletInfo(walletId) {
   }
 }
 
-// In-memory RPC cache Ú¿‘ bounded with TTL eviction to prevent OOM on 512MB dynos.
+// In-memory RPC cache  bounded with TTL eviction to prevent OOM on 512MB dynos.
 const rpcCache = new Map(); // requestHash -> { data, ts }
 const RPC_CACHE_TTL = 3000; // 3 seconds TTL
 const RPC_CACHE_MAX = 2000; // hard cap: evict oldest when exceeded
@@ -1603,7 +1627,7 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
     try {
       const setId = await ensureWalletSet();
     const createRes = await circle.createWallets({
-      accountType: WALLET_ACCOUNT_TYPE, // SCA Ú∆“ gasless via Gas Station (see WALLET_ACCOUNT_TYPE)
+      accountType: WALLET_ACCOUNT_TYPE, // SCA  gasless via Gas Station (see WALLET_ACCOUNT_TYPE)
       blockchains: ['ARC-TESTNET'],
       count: 1,
       walletSetId: setId,
@@ -1623,7 +1647,7 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
 
     // Welcome bonus: brand-new VERIFIED users get a small USDC float so they can
     // immediately make a real prediction/payment (converts a visit into a tx).
-    // Fire-and-forget Ú¿‘ never blocks wallet creation. Anti-abuse: only
+    // Fire-and-forget  never blocks wallet creation. Anti-abuse: only
     // supabase_<uuid> verified ids, one-time per user (deduped on-chain by a
     // marker row), treasury floor + global daily cap.
     if (wallet.address) sendWelcomeBonus(userId, wallet.address).catch(() => {});
@@ -1639,9 +1663,9 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
 });
 
 // One-time welcome USDC bonus for new verified users. Guards:
-//  Ú¿‚ only verified supabase_<uuid> ids (no eth_/agent_/guest),
-//  Ú¿‚ idempotent: a `welcome_grants` row (unique user_id) is the dedupe key,
-//  Ú¿‚ treasury must hold > floor, and a global daily cap limits total spend.
+//   only verified supabase_<uuid> ids (no eth_/agent_/guest),
+//   idempotent: a `welcome_grants` row (unique user_id) is the dedupe key,
+//   treasury must hold > floor, and a global daily cap limits total spend.
 const WELCOME_BONUS_USDC = parseFloat(process.env.WELCOME_BONUS_USDC || '0.5');
 const WELCOME_BONUS_ENABLED = (process.env.WELCOME_BONUS_ENABLED || 'true') === 'true';
 const WELCOME_TREASURY_FLOOR = parseFloat(process.env.WELCOME_TREASURY_FLOOR || '5');
@@ -1657,23 +1681,23 @@ async function sendWelcomeBonus(userId, toAddress) {
       .insert({ user_id: userId, amount_usdc: WELCOME_BONUS_USDC, address: toAddress });
     if (resErr) {
       if (/relation .* does not exist/i.test(resErr.message)) {
-        console.warn('[welcome] welcome_grants table missing Ú¿‘ skipping (run migration)');
+        console.warn('[welcome] welcome_grants table missing  skipping (run migration)');
       }
-      return; // duplicate (already granted) or table missing Ú∆“ no send
+      return; // duplicate (already granted) or table missing  no send
     }
     // Global daily cap.
     const since = new Date().toISOString().slice(0, 10) + 'T00:00:00Z';
     const { count } = await supabase
       .from('welcome_grants').select('id', { count: 'exact', head: true }).gte('created_at', since);
     if ((count ?? 0) * WELCOME_BONUS_USDC > WELCOME_DAILY_CAP_USDC) {
-      console.warn('[welcome] daily cap reached Ú¿‘ skipping bonus');
+      console.warn('[welcome] daily cap reached  skipping bonus');
       await supabase.from('welcome_grants').delete().eq('user_id', userId); // release reservation
       return;
     }
     // Treasury floor.
     const treasury = await getTreasuryUsdcBalance();
     if (treasury != null && treasury < WELCOME_TREASURY_FLOOR + WELCOME_BONUS_USDC) {
-      console.warn(`[welcome] treasury too low (${treasury}) Ú¿‘ skipping bonus`);
+      console.warn(`[welcome] treasury too low (${treasury})  skipping bonus`);
       await supabase.from('welcome_grants').delete().eq('user_id', userId);
       return;
     }
@@ -1695,7 +1719,7 @@ async function sendWelcomeBonus(userId, toAddress) {
           stringToHex(JSON.stringify({ kind: 'welcome_bonus', usdc: WELCOME_BONUS_USDC }))],
       });
     } catch (_) {
-      // Memo path failed Ú¿‘ fall back to a plain transfer so the user still gets funded.
+      // Memo path failed  fall back to a plain transfer so the user still gets funded.
       txHash = await walletClient.writeContract({
         address: USDC,
         abi: [{ name: 'transfer', type: 'function', stateMutability: 'nonpayable',
@@ -1761,7 +1785,7 @@ app.get('/api/wallet/balance', apiKeyOrAuth, async (req, res) => {
   }
 });
 
-// POST /api/wallet/withdraw Ú¿‘ send USDC from the user's Puls (Circle MPC) wallet
+// POST /api/wallet/withdraw  send USDC from the user's Puls (Circle MPC) wallet
 // to any Arc address. Real on-chain transfer; gasless from the SCA wallet.
 app.post('/api/wallet/withdraw', authenticateUser, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
@@ -1770,7 +1794,7 @@ app.post('/api/wallet/withdraw', authenticateUser, requireVerifiedUser, strictLi
     const amount = Number(req.body.amountUsdc);
 
     if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
-      return res.status(400).json({ error: 'Enter a valid Arc (0xÚ¿Ê) address.' });
+      return res.status(400).json({ error: 'Enter a valid Arc (0x) address.' });
     }
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: 'Enter a valid amount.' });
@@ -1815,7 +1839,7 @@ app.post('/api/wallet/withdraw', authenticateUser, requireVerifiedUser, strictLi
       } catch (_) {}
     }
 
-    console.log(`[withdraw] ${amount} USDC ${info.address} Ú∆“ ${to} (tx ${txHash || txId})`);
+    console.log(`[withdraw] ${amount} USDC ${info.address}  ${to} (tx ${txHash || txId})`);
     res.json({
       ok: true,
       amountUsdc: amount,
@@ -1850,14 +1874,14 @@ app.get('/api/wallet/export', authenticateUser, requireVerifiedUser, strictLimit
   }
 });
 
-// Ú‘¿Ú‘¿ GET /api/markets Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  GET /api/markets 
 
 // Anchor the price users SEE to the real-world Polymarket consensus, blending
 // toward the on-chain LMSR price only as genuine on-chain liquidity builds.
 //
 // Why: a freshly-deployed market starts at a 50/50 LMSR pool and only moves when
-// someone trades on Puls. Showing a raw 50T‚/50T‚ on a market that Polymarket
-// prices at (say) 5T‚ YES misleads users and lets the on-chain price drift away
+// someone trades on Puls. Showing a raw 50T/50T on a market that Polymarket
+// prices at (say) 5T YES misleads users and lets the on-chain price drift away
 // from reality. So with little on-chain volume we trust Polymarket; once real
 // USDC liquidity accumulates, we trust the market itself.
 //
@@ -1868,7 +1892,7 @@ function displayPrices(onchainYes, pmYes, totalVolume) {
   const oc = (typeof onchainYes === 'number' && onchainYes >= 0 && onchainYes <= 1) ? onchainYes : null;
   // Always quote the Polymarket consensus when we have it. The on-chain LMSR
   // price only governs actual share payouts; on a low-liquidity testnet it can
-  // drift far from consensus, which looks broken (e.g. PM 2T‚ vs Arc 50T‚) and
+  // drift far from consensus, which looks broken (e.g. PM 2T vs Arc 50T) and
   // even makes our own agents distrust Arc. So the PRICE users and agents see
   // tracks Polymarket 1:1; on-chain is used only when there's no consensus.
   if (pm !== null) return { yes: pm, no: 1 - pm };
@@ -1878,11 +1902,11 @@ function displayPrices(onchainYes, pmYes, totalVolume) {
 
 // Pulse-native engagement aggregation (trades + comments) shown on the markets
 // feed. This used to scan the FULL trades + comments tables on EVERY
-// /api/markets request Ú¿‘ O(all trades) per call, which grows with traction and
+// /api/markets request  O(all trades) per call, which grows with traction and
 // burns the 1-vCPU box on revalidations / query-param variants. Memoize it for a
 // short window so concurrent requests share one scan (the feed is 10s CDN-cached).
 let _activityAgg = { at: 0, tradeAgg: {}, commentAgg: {} };
-let _pmLastGood = null; // last successful Polymarket markets list Ú¿‘ served on upstream failure so the feed never empties/hangs
+let _pmLastGood = null; // last successful Polymarket markets list  served on upstream failure so the feed never empties/hangs
 const ACTIVITY_AGG_TTL = parseInt(process.env.MARKETS_ACTIVITY_TTL_MS || '25000', 10);
 async function getMarketActivityAgg() {
   if (Date.now() - _activityAgg.at < ACTIVITY_AGG_TTL) return _activityAgg;
@@ -1959,7 +1983,7 @@ app.get('/api/markets', async (req, res) => {
     const limit = req.query.limit || 50;
     const offset = req.query.offset || 0;
 
-    // Pulse-native engagement (trades + comments) shown on the feed Ú¿‘ memoized
+    // Pulse-native engagement (trades + comments) shown on the feed  memoized
     // (see getMarketActivityAgg) so a burst of requests / CDN revalidations don't
     // each re-scan the full trades + comments tables.
     const { tradeAgg, commentAgg } = await getMarketActivityAgg();
@@ -2056,7 +2080,7 @@ app.get('/api/markets', async (req, res) => {
     } catch (e) {
       console.warn('[markets] Polymarket fetch error:', e.message);
     }
-    // Upstream down/slow/empty Ú∆“ fetchGamma already served stale if available,
+    // Upstream down/slow/empty  fetchGamma already served stale if available,
     // but keep the existing _pmLastGood fallback for this high-traffic route.
     if ((!Array.isArray(list) || !list.length) && _pmLastGood && Array.isArray(_pmLastGood.data)) {
       console.warn('[markets] serving last-good Polymarket cache (' + _pmLastGood.data.length + ' markets, age ' + Math.round((Date.now() - _pmLastGood.at) / 1000) + 's)');
@@ -2132,7 +2156,7 @@ app.get('/api/markets', async (req, res) => {
       // sports match that just ended). Don't let users trade those: if the event
       // has ended (or our on-chain market is resolved) force acceptingOrders off.
       // Polymarket also leaves some markets `active:true` past their endDate until
-      // UMA resolves them Ú¿‘ treat a passed deadline as ended too, so the feed stays
+      // UMA resolves them  treat a passed deadline as ended too, so the feed stays
       // consistent with the /api/trade/buy deadline guard and the on-chain market.
       const deadlineMs = j.endDate ? Date.parse(j.endDate) : NaN;
       const deadlinePassed = Number.isFinite(deadlineMs) && deadlineMs < Date.now();
@@ -2270,7 +2294,7 @@ app.get('/api/market/info', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Resolution transparency (PR 4) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Resolution transparency (PR 4) 
 // GET /api/market/resolution-status?slug=...
 // Tells the app HOW a market resolves: legacy Polymarket-consensus direct
 // resolve, or UMA Optimistic Oracle (with live request state + dispute window).
@@ -2328,7 +2352,7 @@ app.get('/api/market/resolution-status', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Price history (PR 4) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Price history (PR 4) 
 // GET /api/market/price-history?slug=...&hours=168
 // Returns the YES-price series implied by completed trades on this market
 // (entry_price is recorded per trade), oldest first.
@@ -2371,7 +2395,7 @@ app.get('/api/market/price-history', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Trade Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Trade 
 
 app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, async (req, res) => {
   try {
@@ -2383,7 +2407,7 @@ app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asyn
     // markets acceptingOrders:false, and the on-chain contract enforces it too.
     const deadlineSec = Number(deadline);
     if (Number.isFinite(deadlineSec) && deadlineSec > 0 && deadlineSec * 1000 < Date.now()) {
-      return res.status(400).json({ error: 'This market has closed Ú¿‘ pick another one.' });
+      return res.status(400).json({ error: 'This market has closed  pick another one.' });
     }
 
     const walletId = await getWalletId(userId);
@@ -2412,7 +2436,7 @@ app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asyn
           abiParameters: [contractAddress, MAX],
           fee: { type: 'level', config: { feeLevel: 'HIGH' } },
         });
-        // Poll the approval tx instead of a fixed sleep Ú¿‘ slow approvals used
+        // Poll the approval tx instead of a fixed sleep  slow approvals used
         // to make the follow-up buy revert with "transfer amount exceeds allowance".
         const approveTxId = approveRes.data?.id;
         for (let i = 0; approveTxId && i < 20; i++) {
@@ -2461,7 +2485,7 @@ app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asyn
       })
       .catch((err) => console.error('[copy] mirror dispatch error:', err.message));
 
-    // Points (Traction): reward the trade Ú¿‘ fire-and-forget, never blocks.
+    // Points (Traction): reward the trade  fire-and-forget, never blocks.
     (async () => {
       try {
         await touchStreak(userId);
@@ -2479,8 +2503,8 @@ app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asyn
             if (ref?.referrer_user_id && ref.referrer_user_id !== userId) {
               await awardPoints(ref.referrer_user_id, 'referral_activated', { refType: 'referral', refId: userId });
               await awardPoints(userId, 'referral_activated', { refType: 'referral', refId: `self-${userId}` });
-              createNotification(ref.referrer_user_id, 'Your invite activated! ®ﬂŒ…',
-                'A friend you invited just made their first prediction Ú¿‘ you both earned +60 XP.', 'referral_activated').catch(() => {});
+              createNotification(ref.referrer_user_id, 'Your invite activated! ',
+                'A friend you invited just made their first prediction  you both earned +60 XP.', 'referral_activated').catch(() => {});
             }
           } catch (_) {}
         }
@@ -2501,7 +2525,7 @@ app.post('/api/trade/sell', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asy
 
     // Agent-bought positions are held by the user's AI-agent wallet, so the sell
     // must execute from that wallet (the user wallet holds none of those shares).
-    // The agent wallet is derived from the authenticated userId Ú¿‘ no cross-user risk.
+    // The agent wallet is derived from the authenticated userId  no cross-user risk.
     const isAgentPosition = owner === 'agent';
     const walletOwnerId = isAgentPosition ? `agent_${userId}` : userId;
     const walletId = await getWalletId(walletOwnerId);
@@ -2548,7 +2572,7 @@ app.post('/api/trade/sell', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asy
 });
 
 // Batch-claim every resolved + won + unclaimed position for the user. One tap
-// Ú∆“ multiple on-chain claim() txs, a powerful "come back and collect" hook.
+//  multiple on-chain claim() txs, a powerful "come back and collect" hook.
 app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
     const { userId } = req.body;
@@ -2811,16 +2835,16 @@ app.post('/api/trade/save-external', tradeLimiter, async (req, res) => {
   }
 });
 
-// In-memory cache for /api/trade/recent Ú¿‘ this endpoint is polled by the
+// In-memory cache for /api/trade/recent  this endpoint is polled by the
 // frontend feed every few seconds. Without caching, each poll hits Supabase.
 let _recentTradesCache = { data: null, ts: 0 };
-const RECENT_TRADES_TTL_MS = 3000; // 3s Ú¿‘ fresh enough for live feed
+const RECENT_TRADES_TTL_MS = 3000; // 3s  fresh enough for live feed
 app.get('/api/trade/recent', async (req, res) => {
   try {
     const { limit = 20, marketId } = req.query;
     const limitNum = Math.min(100, parseInt(limit) || 20);
 
-    // Use cache for the default (no marketId) case Ú¿‘ avoids hitting Supabase
+    // Use cache for the default (no marketId) case  avoids hitting Supabase
     // on every poll. When marketId is specified, skip cache (different query).
     if (!marketId && _recentTradesCache.data && Date.now() - _recentTradesCache.ts < RECENT_TRADES_TTL_MS) {
       return res.json(_recentTradesCache.data.slice(0, limitNum));
@@ -2853,7 +2877,7 @@ app.get('/api/trade/recent', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ GET /api/portfolio Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  GET /api/portfolio 
 app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
   try {
     let { userId } = req.query;
@@ -3096,7 +3120,7 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ AI Market Analyst Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  AI Market Analyst 
 // Public, cached, auto-generated market brief: thesis, key factors, lean.
 const insightCache = new Map(); // slug -> { data, ts }
 const insightInflight = new Map(); // slug -> Promise
@@ -3142,7 +3166,7 @@ async function generateMarketInsight(slug) {
     ctx.question = data.question || slug.replace(/-/g, ' ');
   }
 
-  const sys = `You are the Puls AI Analyst, a sharp prediction-market researcher. Given a market AND live web research, produce a concise analyst brief grounded in the research Ú¿‘ do NOT invent facts beyond what the question, pricing, and research support.
+  const sys = `You are the Puls AI Analyst, a sharp prediction-market researcher. Given a market AND live web research, produce a concise analyst brief grounded in the research  do NOT invent facts beyond what the question, pricing, and research support.
 Respond with STRICT JSON only, no prose, matching exactly:
 {"thesis": "<2 sentences: what this market is really about and what the current price + latest information implies>", "factors": ["<key factor 1>", "<key factor 2>", "<key factor 3>"], "lean": "YES" | "NO" | "UNCERTAIN", "confidence": "low" | "medium" | "high"}
 Rules: factors are short (max 14 words each), concrete and specific to this question; prefer factors backed by the web research. lean reflects which outcome the evidence and current pricing favor; use UNCERTAIN when genuinely unclear. Never give financial advice wording; this is analysis.`;
@@ -3159,8 +3183,8 @@ Rules: factors are short (max 14 words each), concrete and specific to this ques
   const user = [
     `Market question: ${ctx.question}`,
     ctx.description ? `Resolution criteria / description: ${ctx.description}` : null,
-    ctx.yesPrice != null && !Number.isNaN(ctx.yesPrice) ? `Current YES price: ${(ctx.yesPrice * 100).toFixed(0)}T‚` : null,
-    ctx.change24h != null ? `24h price change: ${(ctx.change24h * 100).toFixed(1)}T‚` : null,
+    ctx.yesPrice != null && !Number.isNaN(ctx.yesPrice) ? `Current YES price: ${(ctx.yesPrice * 100).toFixed(0)}T` : null,
+    ctx.change24h != null ? `24h price change: ${(ctx.change24h * 100).toFixed(1)}T` : null,
     ctx.volume != null ? `Volume: $${ctx.volume}` : null,
     ctx.endDate ? `Resolution date: ${ctx.endDate}` : null,
     research.brief ? `\nLive web research (latest, cite these in your factors):\n${research.brief}` : null,
@@ -3206,23 +3230,23 @@ function quantInsight(slug, ctx) {
 
   const factors = [];
   if (change != null && Math.abs(change) >= 0.5) {
-    factors.push(`Price moved ${change > 0 ? '+' : ''}${change.toFixed(1)}T‚ in the last 24h Ú¿‘ momentum ${change > 0 ? 'toward' : 'away from'} YES`);
+    factors.push(`Price moved ${change > 0 ? '+' : ''}${change.toFixed(1)}T in the last 24h  momentum ${change > 0 ? 'toward' : 'away from'} YES`);
   } else {
-    factors.push('Price has been stable over the last 24h Ú¿‘ no fresh information shifting the odds');
+    factors.push('Price has been stable over the last 24h  no fresh information shifting the odds');
   }
   if (daysLeft != null) {
-    factors.push(daysLeft <= 3 ? `Resolves in ${daysLeft} day${daysLeft === 1 ? '' : 's'} Ú¿‘ little time left for the picture to change` : `${daysLeft} days until resolution Ú¿‘ outcome can still swing on new developments`);
+    factors.push(daysLeft <= 3 ? `Resolves in ${daysLeft} day${daysLeft === 1 ? '' : 's'}  little time left for the picture to change` : `${daysLeft} days until resolution  outcome can still swing on new developments`);
   }
   if (ctx.volume != null && parseFloat(ctx.volume) > 0) {
     factors.push(`$${Math.round(parseFloat(ctx.volume)).toLocaleString('en-US')} in source-market volume backs the current consensus`);
   }
   if (factors.length < 3) {
-    factors.push(lean === 'UNCERTAIN' ? 'Market is near a coin flip Ú¿‘ traders are genuinely split' : `Crowd consensus currently favors ${lean}`);
+    factors.push(lean === 'UNCERTAIN' ? 'Market is near a coin flip  traders are genuinely split' : `Crowd consensus currently favors ${lean}`);
   }
 
   const thesis = lean === 'UNCERTAIN'
-    ? `Traders price YES at ${pct}T‚, treating this as close to a coin flip. Neither side has conviction yet, so new information is likely to move this market sharply.`
-    : `Traders price YES at ${pct}T‚, implying roughly a ${lean === 'YES' ? pct : 100 - pct}% chance the market resolves ${lean}. The crowd has taken a clear side; the open question is whether anything before resolution can flip it.`;
+    ? `Traders price YES at ${pct}T, treating this as close to a coin flip. Neither side has conviction yet, so new information is likely to move this market sharply.`
+    : `Traders price YES at ${pct}T, implying roughly a ${lean === 'YES' ? pct : 100 - pct}% chance the market resolves ${lean}. The crowd has taken a clear side; the open question is whether anything before resolution can flip it.`;
 
   return {
     slug,
@@ -3266,11 +3290,11 @@ app.get('/api/market/insight', insightLimiter, async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Protocol Stats Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Protocol Stats 
 let statsCache = { data: null, ts: 0 };
 const STATS_TTL_MS = 60 * 1000;
 
-// GET /api/stats Ú¿‘ public protocol-level numbers for the landing page
+// GET /api/stats  public protocol-level numbers for the landing page
 app.get('/api/stats', async (req, res) => {
   try {
     if (statsCache.data && Date.now() - statsCache.ts < STATS_TTL_MS) {
@@ -3278,7 +3302,7 @@ app.get('/api/stats', async (req, res) => {
     }
     // Use a single SQL RPC function that aggregates everything in one query.
     // This replaces the old 22-page sequential pagination that took 15-20s.
-    // The RPC runs as a single SELECT on the DB Ú¿‘ returns in <500ms.
+    // The RPC runs as a single SELECT on the DB  returns in <500ms.
     // Fallback: if the RPC function doesn't exist yet (needs manual creation
     // in Supabase SQL Editor), fall back to count-only stats (fast, no pagination).
     const rpcRes = await supabase.rpc('get_protocol_stats');
@@ -3302,7 +3326,7 @@ app.get('/api/stats', async (req, res) => {
     const seedVolumeUsdc = Number(stats.seed_volume || 0);
     const agentCount = Number(stats.agent_count || 0);
 
-    // Nanopayment volume Ú¿‘ from RPC if available, else single query
+    // Nanopayment volume  from RPC if available, else single query
     const payCount = Number(stats.nanopayments || payCountRes.count || 0);
     const nanoVolumeUsdc = Number(stats.nano_volume || 0);
     let protocolRevenueUsdc = 0;
@@ -3313,7 +3337,7 @@ app.get('/api/stats', async (req, res) => {
         .select('amount_usdc')
         .limit(10000);
       for (const r of (nanoAgg || [])) {
-        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0; // won't run Ú¿‘ nanoVolumeUsdc is const above
+        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0; // won't run  nanoVolumeUsdc is const above
       }
     }
     const r2 = (n) => Math.round(n * 100) / 100;
@@ -3344,7 +3368,7 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ GET /api/live Ú¿‘ lightweight, poll-every-second counters for Puls Explorer Ú‘¿
+//  GET /api/live  lightweight, poll-every-second counters for Puls Explorer 
 // Cheap head-count queries only (no row pagination), 2s micro-cache so a 1s
 // poll never hammers the DB. Plus the single most-recent trade for a "live tick".
 let liveCache = { data: null, ts: 0 };
@@ -3367,12 +3391,12 @@ app.get('/api/live', async (req, res) => {
     if (latest) {
       const uid = latest.user_id || '';
       const isAgent = uid === HOUSE_AGENT_USER || uid.startsWith('agent_')
-        || (typeof latest.question === 'string' && latest.question.startsWith('®ﬂ‰÷ Agent:'));
+        || (typeof latest.question === 'string' && latest.question.startsWith(' Agent:'));
       last = {
         side: (latest.side || '').toUpperCase(),
         amountUsdc: Math.round((parseFloat(latest.usdc_amount) || 0) * 100) / 100,
         isAgent,
-        question: (latest.question || '').replace('®ﬂ‰÷ Agent:', '').trim().slice(0, 80),
+        question: (latest.question || '').replace(' Agent:', '').trim().slice(0, 80),
         at: latest.created_at,
       };
     }
@@ -3397,12 +3421,12 @@ app.get('/api/live', async (req, res) => {
 // agent) pays a sub-cent USDC nanopayment that settles to the seller's Arc
 // wallet; the tx is visible on arcscan. See lib/x402.js.
 
-// Public config Ú¿‘ free. Useful for the buyer agent, demos and judges.
+// Public config  free. Useful for the buyer agent, demos and judges.
 app.get('/api/x402/info', x402Info);
 
 // Paywalled premium forecast ($0.001). First paid endpoint of the creator loop.
 app.get('/api/alpha/sample', x402Paywall('$0.001', '/api/alpha/sample', {
-  description: 'Puls premium forecast Ú¿‘ sample alpha signal',
+  description: 'Puls premium forecast  sample alpha signal',
 }), (req, res) => {
   res.json({
     signal: {
@@ -3421,10 +3445,10 @@ app.get('/api/alpha/sample', x402Paywall('$0.001', '/api/alpha/sample', {
   });
 });
 
-// Creator earnings / x402 receipts Ú¿‘ the in-app proof feed for nanopayments.
+// Creator earnings / x402 receipts  the in-app proof feed for nanopayments.
 // Each settled x402 payment is logged to Supabase `x402_payments`. We surface
 // them as human receipts: amount, resource, payer, and the Circle Gateway
-// transfer id (a payment receipt Ú¿‘ NOT an on-chain tx hash, since Gateway
+// transfer id (a payment receipt  NOT an on-chain tx hash, since Gateway
 // batches settlements). The real on-chain settlement to the seller shows up in
 // /api/economy/feed (seller is a tracked address) with an openable Arcscan tx.
 app.get('/api/x402/payments', async (req, res) => {
@@ -3450,10 +3474,10 @@ app.get('/api/x402/payments', async (req, res) => {
     }
 
     // Agent name lookup
-    const agentNames = { agent_swarm_vega: 'Vega Ú⁄·', agent_swarm_cygnus: 'Cygnus ®ﬂ€·ˇ¨œ', agent_swarm_orion: 'Orion ®ﬂ‘Ì', agent_swarm_atlas: 'Atlas ®ﬂ”»', agent_swarm_nova: 'Nova ®ﬂÃ–', agent_swarm_striker: 'Striker Ú⁄-', agent_sage: 'Sage ®ﬂ‘Ó', house_pulse: 'Pulse ®ﬂ‰÷' };
+    const agentNames = { agent_swarm_vega: 'Vega ', agent_swarm_cygnus: 'Cygnus ', agent_swarm_orion: 'Orion ', agent_swarm_atlas: 'Atlas ', agent_swarm_nova: 'Nova ', agent_swarm_striker: 'Striker -', agent_sage: 'Sage ', house_pulse: 'Pulse ' };
     const nameFor = (id) => agentNames[id] || (id || '').replace('agent_swarm_','').replace('agent_','');
 
-    const short = (a) => (a && a.length > 12 ? `${a.slice(0, 6)}Ú¿Ê${a.slice(-4)}` : (a || 'Ú¿‘'));
+    const short = (a) => (a && a.length > 12 ? `${a.slice(0, 6)}${a.slice(-4)}` : (a || ''));
     const payments = rows.map((r) => {
       const raw = (typeof r.raw === 'string') ? JSON.parse(r.raw || '{}') : (r.raw || {});
       return {
@@ -3496,7 +3520,7 @@ app.get('/api/x402/payments', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Points Engine + Onboarding Quests (Traction: activation + retention) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Points Engine + Onboarding Quests (Traction: activation + retention) 
 // Off-chain XP only (not a token, not redeemable). Helpers are hooked into the
 // confirmed-event handlers (trade/claim) and passed to tips/comments/signals.
 // Safe no-op until the migration (migrations/2026-06-19-points.sql) runs.
@@ -3506,7 +3530,7 @@ const points = registerPoints(app, {
 const awardPoints = points.awardPoints;
 const touchStreak = points.touchStreak;
 
-// Ú‘¿Ú‘¿ Copy-trade creator layer (T1) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Copy-trade creator layer (T1) 
 // Followers mirror a leader's BUYs (scaled to a per-trade cap) and pay the leader
 // a per-event creator micro-fee. Live mirroring is gated by env COPY_TRADE_ENABLED.
 const copyTrade = registerCopyTrade(app, {
@@ -3529,7 +3553,7 @@ const copyTrade = registerCopyTrade(app, {
   usdcTransferWithTakeRate,
 });
 
-// Ú‘¿Ú‘¿ Alpha paid-analysis (T1 creator layer) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Alpha paid-analysis (T1 creator layer) 
 // Premium forecasts sold per-read: teaser free, full thesis unlocks for a sub-cent
 // USDC micro-payment to the creator. Real on-chain transfer (gasless SCA), receipt
 // in the Earnings tab (endpoint='alpha_unlock'). Live payments gated by ALPHA_PAID_ENABLED.
@@ -3548,8 +3572,8 @@ registerAlpha(app, {
   usdcTransferWithTakeRate,
 });
 
-// Ú‘¿Ú‘¿ One-tap tips (T1 creator layer) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
-// A reader tips a forecaster a small fixed USDC amount with one tap Ú¿‘ a real
+//  One-tap tips (T1 creator layer) 
+// A reader tips a forecaster a small fixed USDC amount with one tap  a real
 // on-chain transfer (gasless SCA) to the creator, receipt in the Earnings tab
 // (endpoint='tip'). Live payments gated by TIPS_ENABLED.
 registerTips(app, {
@@ -3568,7 +3592,7 @@ registerTips(app, {
   usdcTransferWithTakeRate,
 });
 
-// Ú‘¿Ú‘¿ Puls Streams (pay-per-second USDC streaming on Arc) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Puls Streams (pay-per-second USDC streaming on Arc) 
 // Continuous authorization (approve a rate + cap), proof-of-flow metering that
 // auto-pauses the instant flow stops, and Gateway-style batched on-chain USDC
 // settlement, with a live revenue split. Agents open/tick/stop streams
@@ -3587,7 +3611,7 @@ const streamsApi = registerStreaming(app, {
   awardPoints,
 });
 
-// Ú‘¿Ú‘¿ Comments (community layer, F1) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Comments (community layer, F1) 
 // Signed-in users comment on markets/profiles/events/alpha, reply (one level)
 // and like, with an in-app notification to the author on reply/like. Stored in
 // Supabase; writes throttled + verified-only; soft-delete. Moves no funds, so
@@ -3601,11 +3625,11 @@ registerComments(app, {
   awardPoints,
 });
 
-// Ú‘¿Ú‘¿ Support tickets (in-app help desk, F5) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Support tickets (in-app help desk, F5) 
 // Our own ticket support replaces the region-blocked Tawk.to live-chat. Verified
 // users open tickets; an admin (ADMIN_USER_IDS) answers, and the user gets an
 // in-app notification. Stored in Supabase; writes throttled + verified-only.
-// Moves no funds Ú∆“ ON by default (optional SUPPORT_ENABLED kill-switch).
+// Moves no funds  ON by default (optional SUPPORT_ENABLED kill-switch).
 registerSupport(app, {
   supabase,
   authenticateUser,
@@ -3614,8 +3638,8 @@ registerSupport(app, {
   createNotification,
 });
 
-// Ú‘¿Ú‘¿ Referrals (refer-a-friend, invite mechanic only, F3) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
-// Invite mechanic only Ú¿‘ NO automatic USDC payout (little testnet USDC + farming
+//  Referrals (refer-a-friend, invite mechanic only, F3) 
+// Invite mechanic only  NO automatic USDC payout (little testnet USDC + farming
 // risk). Each user gets a code + share link; new users claim a code once; we
 // surface an "invited N friends" badge. ON by default (REFERRALS_ENABLED switch).
 registerReferrals(app, {
@@ -3626,9 +3650,9 @@ registerReferrals(app, {
   createNotification,
 });
 
-// Ú‘¿Ú‘¿ Creator Signals (premium forecasts, on-chain attested, x402 per-read) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
-// The full creator-economy content layer: creators draft Ú∆“ publish (writes an
-// on-chain attestation to the SignalRegistry on Arc) Ú∆“ readers pay a per-read
+//  Creator Signals (premium forecasts, on-chain attested, x402 per-read) 
+// The full creator-economy content layer: creators draft  publish (writes an
+// on-chain attestation to the SignalRegistry on Arc)  readers pay a per-read
 // USDC nanopayment to unlock the thesis (real SCA transfer to the creator,
 // receipt endpoint='signal_unlock'). Per-signal analytics (views/unlocks/rev).
 // Live payments gated by SIGNALS_PAID_ENABLED; on-chain attest needs
@@ -3656,7 +3680,7 @@ registerCreatorSignals(app, {
   usdcTransferWithTakeRate,
 });
 
-// Ú‘¿Ú‘¿ Agent skin-in-the-game (AgentBond) Ú¿‘ gated reconciler + read endpoint Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Agent skin-in-the-game (AgentBond)  gated reconciler + read endpoint 
 // Agents stake USDC on their published calls; slashed if wrong, returned if
 // right (settled on resolution). Decoupled + best-effort + gated by
 // AGENT_BOND_ENABLED; /api/agents/bonds is always read-safe.
@@ -3674,7 +3698,7 @@ registerAgentBond(app, {
   deployedMarketsCache,
 });
 
-// Ú‘¿Ú‘¿ Token swap (Circle App Kit) Ú¿‘ USDC <-> EURC on Arc Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Token swap (Circle App Kit)  USDC <-> EURC on Arc 
 // Real on-chain stablecoin FX from the user's own Circle MPC wallet, via Circle's
 // App Kit Swap. Estimate-first; gated by KIT_KEY (free, Circle Console).
 registerSwap(app, {
@@ -3685,11 +3709,11 @@ registerSwap(app, {
   strictLimiter,
 });
 
-// Ú‘¿Ú‘¿ Blog (long-form posts by humans AND AI agents, x402 tips both ways) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Blog (long-form posts by humans AND AI agents, x402 tips both ways) 
 // Humans post anything; swarm agents publish a daily NYT-style news analysis
 // grounded in live web research (with cited sources). Tips reuse /api/tips
 // (x402 USDC, both directions); comments reuse the shared comments layer with
-// target_type='blog'. Moves no funds Ú∆“ ON by default (BLOG_ENABLED switch).
+// target_type='blog'. Moves no funds  ON by default (BLOG_ENABLED switch).
 const blog = registerBlog(app, {
   supabase,
   authenticateUser,
@@ -3699,7 +3723,7 @@ const blog = registerBlog(app, {
   awardPoints,
 });
 
-// Ú‘¿Ú‘¿ Agent Oracle (AI Panel + ask-agent + correlations) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Agent Oracle (AI Panel + ask-agent + correlations) 
 // The AI layer over every market: aggregate the swarm's stance into a consensus
 // probability shown beside the crowd (Polymarket), let users ask an agent to
 // defend a side with live sources, and surface AI-found predict-to-predict
@@ -3735,7 +3759,7 @@ registerAgentOracle(app, {
   listMarketSummaries,
 });
 
-// Ú‘¿Ú‘¿ Agent Duel Ú¿‘ the Colosseum Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Agent Duel  the Colosseum 
 // Two AI agents stake USDC on opposite sides of the same market. When it resolves,
 // the loser's stake goes to the winner. Gated by AGENT_DUEL_ENABLED.
 registerAgentDuel(app, {
@@ -3750,7 +3774,7 @@ registerAgentDuel(app, {
   deployedMarketsCache,
 });
 
-// Ú‘¿Ú‘¿ Lepton Ú¿‘ pay one lepton ($0.000001), ask the swarm Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Lepton  pay one lepton ($0.000001), ask the swarm 
 // A public, keyless x402 endpoint. Judge runs a curl, pays the floor coin, gets
 // the swarm's answer. No login, no API key, sub-cent settlement on Arc.
 registerLepton(app, {
@@ -3759,7 +3783,7 @@ registerLepton(app, {
   formatForApp,
 });
 
-// Ú‘¿Ú‘¿ Agent P&L Ú¿‘ verifiable per-agent unit economics Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Agent P&L  verifiable per-agent unit economics 
 // Revenue vs costs for every AI agent: signals sold, tips, bonds, buys.
 // Every line item verifiable on Arcscan. Proves the economy is net-positive.
 registerAgentPnl(app, {
@@ -3767,7 +3791,7 @@ registerAgentPnl(app, {
   circle,
 });
 
-// /health Ú¿‘ quick liveness probe (returns 200 immediately). Use for
+// /health  quick liveness probe (returns 200 immediately). Use for
 // Heroku's restart-on-failure check + uptime monitors that just need "up?".
 app.get('/health', (req, res) => {
   const mem = process.memoryUsage();
@@ -3809,7 +3833,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Ú‘¿Ú‘¿ Image Proxy Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Image Proxy 
 // Bypasses CORS restrictions for CanvasKit in Flutter Web.
 app.get('/api/image-proxy', async (req, res) => {
   const imageUrl = req.query.url;
@@ -3831,7 +3855,7 @@ app.get('/api/image-proxy', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Dynamic OG share image for a market (SVG) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Dynamic OG share image for a market (SVG) 
 // Rich link previews when a prediction is shared: question + YES/NO odds on the
 // brand gradient. SVG = no image libs, instant, cacheable. Used as og:image by
 // the /m/<slug> share landing.
@@ -3867,14 +3891,14 @@ app.get('/api/og/market/:slug', async (req, res) => {
   </defs>
   <rect width="1200" height="630" fill="url(#bg)"/>
   <text x="64" y="100" fill="url(#brand)" font-family="system-ui,Segoe UI,Roboto,sans-serif" font-size="40" font-weight="800">Puls</text>
-  <text x="1136" y="100" text-anchor="end" fill="#9AA6C0" font-family="system-ui,sans-serif" font-size="22" font-weight="600">prediction market T¨ Arc</text>
+  <text x="1136" y="100" text-anchor="end" fill="#9AA6C0" font-family="system-ui,sans-serif" font-size="22" font-weight="600">prediction market T Arc</text>
   ${qLines.map((l, i) => `<text x="64" y="${230 + i * 64}" fill="#EAF0FF" font-family="system-ui,sans-serif" font-size="52" font-weight="800">${l}</text>`).join('')}
   <rect x="64" y="470" width="510" height="96" rx="18" fill="#102A2A" stroke="#2DD4BF" stroke-width="2"/>
   <text x="92" y="512" fill="#2DD4BF" font-family="system-ui,sans-serif" font-size="22" font-weight="700">YES</text>
-  <text x="92" y="552" fill="#EAF0FF" font-family="system-ui,sans-serif" font-size="40" font-weight="900">${yes}T‚</text>
+  <text x="92" y="552" fill="#EAF0FF" font-family="system-ui,sans-serif" font-size="40" font-weight="900">${yes}T</text>
   <rect x="626" y="470" width="510" height="96" rx="18" fill="#3B0A2A" stroke="#F472B6" stroke-width="2"/>
   <text x="654" y="512" fill="#F472B6" font-family="system-ui,sans-serif" font-size="22" font-weight="700">NO</text>
-  <text x="654" y="552" fill="#EAF0FF" font-family="system-ui,sans-serif" font-size="40" font-weight="900">${no}T‚</text>
+  <text x="654" y="552" fill="#EAF0FF" font-family="system-ui,sans-serif" font-size="40" font-weight="900">${no}T</text>
 </svg>`;
     res.set('Content-Type', 'image/svg+xml');
     res.set('Cache-Control', 'public, max-age=300');
@@ -3884,12 +3908,12 @@ app.get('/api/og/market/:slug', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Web3 (MetaMask) endpoints Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
-// MetaMask users trade directly on-chain Ú¿‘ they don't need Circle SCA wallets.
+//  Web3 (MetaMask) endpoints 
+// MetaMask users trade directly on-chain  they don't need Circle SCA wallets.
 // These endpoints accept on-chain tx hashes, verify them, and record the trades.
-// No requireVerifiedUser Ú¿‘ web3 guests are allowed (they signed on-chain).
+// No requireVerifiedUser  web3 guests are allowed (they signed on-chain).
 
-// POST /api/trade/claim-external Ú¿‘ record a claim that a MetaMask user made
+// POST /api/trade/claim-external  record a claim that a MetaMask user made
 // directly on-chain. Verifies the tx sender + market contract.
 app.post('/api/trade/claim-external', tradeLimiter, async (req, res) => {
   try {
@@ -3939,7 +3963,7 @@ app.post('/api/trade/claim-external', tradeLimiter, async (req, res) => {
 
 // Deep health check for demo-day readiness: pings every external dependency and
 // reports the treasury balance in one call. Returns 200 when all checks pass,
-// 503 otherwise. Cheap enough to poll, but not behind auth Ú¿‘ exposes no secrets.
+// 503 otherwise. Cheap enough to poll, but not behind auth  exposes no secrets.
 app.get('/health/deep', async (_req, res) => {
   const checks = {};
   const time = async (fn) => { const t = Date.now(); try { await fn(); return { ok: true, ms: Date.now() - t }; } catch (e) { return { ok: false, ms: Date.now() - t, error: e.message }; } };
@@ -3957,7 +3981,7 @@ app.get('/health/deep', async (_req, res) => {
     else if (typeof circle.getWalletSets === 'function') { await circle.getWalletSets({ pageSize: 1 }); }
     else { throw new Error('Circle client not initialized'); }
   });
-  // Treasury balance (informational Ú¿‘ does not fail the check on its own)
+  // Treasury balance (informational  does not fail the check on its own)
   const treasury = await getTreasuryUsdcBalance();
   checks.treasury = {
     address: adminAccount?.address || null,
@@ -3977,7 +4001,7 @@ app.get('/health/deep', async (_req, res) => {
   });
 });
 
-// Ú‘¿Ú‘¿ Circle webhook + signature verification Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Circle webhook + signature verification 
 // Circle signs every webhook with a per-message ECDSA (P-256, SHA-256) key.
 // Headers: `X-Circle-Signature` (base64 DER signature) and `X-Circle-Key-Id`
 // (UUID of the public key). We fetch + cache the public key by id and verify the
@@ -3987,7 +4011,7 @@ app.get('/health/deep', async (_req, res) => {
 // Rollout safety: verification is ATTEMPTED on every request, but it is only
 // ENFORCED (request rejected on failure/missing signature) when
 // CIRCLE_WEBHOOK_ENFORCE=true. Default is off so an unverified-but-legitimate
-// webhook can't silently stop trade-state updates during the demo Ú¿‘ flip it on
+// webhook can't silently stop trade-state updates during the demo  flip it on
 // once you've confirmed signatures verify in the logs.
 const CIRCLE_WEBHOOK_ENFORCE = (process.env.CIRCLE_WEBHOOK_ENFORCE || 'false').toLowerCase() === 'true';
 const circlePublicKeyCache = new Map(); // keyId -> crypto.KeyObject
@@ -4051,7 +4075,7 @@ app.post('/api/webhook/circle', async (req, res) => {
   // doesn't keep retrying a request we deliberately rejected.
   const verified = await verifyCircleWebhook(req);
   if (verified === false) {
-    console.warn('[Circle Webhook] INVALID signature Ú¿‘ rejected.');
+    console.warn('[Circle Webhook] INVALID signature  rejected.');
     return res.status(401).json({ error: 'Invalid signature' });
   }
   if (verified === null) {
@@ -4059,7 +4083,7 @@ app.post('/api/webhook/circle', async (req, res) => {
       console.warn('[Circle Webhook] Unsigned/unverifiable request rejected (enforce on).');
       return res.status(401).json({ error: 'Unverified webhook' });
     }
-    console.warn('[Circle Webhook] Could not verify signature (enforce off) Ú¿‘ processing anyway. Set CIRCLE_WEBHOOK_ENFORCE=true once verification is confirmed.');
+    console.warn('[Circle Webhook] Could not verify signature (enforce off)  processing anyway. Set CIRCLE_WEBHOOK_ENFORCE=true once verification is confirmed.');
   }
 
   // CRITICAL: Do NOT ack 200 or mark processed BEFORE processing.
@@ -4081,21 +4105,21 @@ app.post('/api/webhook/circle', async (req, res) => {
       state,
       tx_hash: txHash ?? null,
     }).eq('tx_id', txId);
-    console.log(`Webhook: tx ${txId} Ú∆“ ${state}`);
+    console.log(`Webhook: tx ${txId}  ${state}`);
     res.sendStatus(200);
   } catch (e) {
     console.error('webhook error:', e.message);
   }
 });
 
-// Ú‘¿Ú‘¿ QuickNode Webhook Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  QuickNode Webhook 
 
 const processedChainLogs = new Set();
 async function handleQuickNodeLog(log) {
   try {
     // Idempotency: a (txHash, logIndex) pair uniquely identifies an on-chain
     // event, so retried/duplicated webhook deliveries are processed once.
-    // CRITICAL: Do NOT add to the Set BEFORE processing Ú¿‘ if processing fails,
+    // CRITICAL: Do NOT add to the Set BEFORE processing  if processing fails,
     // the retried webhook would be silently skipped. Check, process, THEN add.
     const logKey = `${(log.transactionHash || '').toLowerCase()}:${log.logIndex ?? ''}`;
     if (logKey !== ':' ) {
@@ -4198,7 +4222,7 @@ async function handleQuickNodeLog(log) {
             for (const uId of uniqueUserIds) {
               createNotification(
                 uId,
-                'Market Resolved ®ﬂ‘Ó',
+                'Market Resolved ',
                 `Market "${question}" has resolved to ${outcome ? 'YES' : 'NO'}. Claim your winnings now!`,
                 'resolution'
               ).catch(console.error);
@@ -4292,7 +4316,7 @@ app.post('/api/webhook/quicknode', async (req, res) => {
   }
 });
 
-// Ú‘¿Ú‘¿ Market resolution (owner fallback / manual) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Market resolution (owner fallback / manual) 
 app.post('/api/market/resolve', authenticateUser, requireVerifiedUser, requireAdmin, strictLimiter, async (req, res) => {
   try {
     const { userId, slug, outcome } = req.body; // outcome: true=YES wins, false=NO wins
@@ -4341,8 +4365,8 @@ app.post('/api/market/resolve', authenticateUser, requireVerifiedUser, requireAd
   }
 });
 
-// Ú‘¿Ú‘¿ Auto-Resolution Cron Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
-// Ú‘¿Ú‘¿ Stale-market archiving Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Auto-Resolution Cron 
+//  Stale-market archiving 
 // Markets that are long past their deadline and that Polymarket can no longer
 // resolve (slug gone, or never resolves) are "zombies": they clutter the app and
 // make every resolution-cron tick slower/noisier. We mark them archived in
@@ -4358,7 +4382,7 @@ async function archiveMarket(slug, reason) {
       .eq('slug', slug);
     if (error) {
       if (/archived/.test(error.message)) {
-        console.warn(`[Archive] 'archived' column missing Ú¿‘ run in Supabase SQL editor: alter table deployed_markets add column if not exists archived boolean default false;`);
+        console.warn(`[Archive] 'archived' column missing  run in Supabase SQL editor: alter table deployed_markets add column if not exists archived boolean default false;`);
       } else {
         console.error(`[Archive] failed for ${slug}:`, error.message);
       }
@@ -4391,14 +4415,14 @@ async function checkAndResolveMarkets() {
   }
 
   if (marketsToResolve.length === 0) {
-    return; // silent Ú¿‘ no spam when nothing to do
+    return; // silent  no spam when nothing to do
   }
 
   // Only log if there are markets to resolve
 
   for (const market of marketsToResolve) {
     try {
-      // Check on-chain state first Ú¿‘ if the market is already resolved on-chain,
+      // Check on-chain state first  if the market is already resolved on-chain,
       // mark it in our cache + DB and skip. This prevents "Already resolved"
       // revert errors from spamming the logs on every cron tick.
       if (market.contractAddress) {
@@ -4420,24 +4444,24 @@ async function checkAndResolveMarkets() {
             const entry = deployedMarketsCache.get(market.slug);
             if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
             await supabase.from('deployed_markets').update({ resolved: true, outcome: outcomeOnChain }).eq('slug', market.slug);
-            console.log(`[resolve] ${market.slug} already resolved on-chain (${outcomeOnChain ? 'YES' : 'NO'}) Ú¿‘ marked in cache`);
+            console.log(`[resolve] ${market.slug} already resolved on-chain (${outcomeOnChain ? 'YES' : 'NO'})  marked in cache`);
             continue;
           }
         } catch (e) {
-          // RPC might be down Ú¿‘ continue to Polymarket check as fallback
+          // RPC might be down  continue to Polymarket check as fallback
           console.warn(`[resolve] on-chain check failed for ${market.slug}: ${e.message}`);
         }
       }
 
       // Gamma's /markets?slug= returns ACTIVE markets only by default, so a
-      // CLOSED/resolved market came back EMPTY Ú¿‘ the cron then treated it as
+      // CLOSED/resolved market came back EMPTY  the cron then treated it as
       // "gone" and ARCHIVED it instead of resolving. The resilient client
       // tries closed markets first (to settle them), then falls back to the
       // open query (still-running ones). Retry + backoff + circuit breaker
       // are handled inside fetchMarketForResolution.
       const pmMarket = await fetchMarketForResolution(market.slug);
       if (!pmMarket) {
-        // Truly gone from Polymarket (neither open nor closed) Ú∆“ can't auto-resolve.
+        // Truly gone from Polymarket (neither open nor closed)  can't auto-resolve.
         if (market.deadline < archiveCutoff) await archiveMarket(market.slug, 'slug gone from Polymarket');
         continue;
       }
@@ -4464,7 +4488,7 @@ async function checkAndResolveMarkets() {
         } catch {}
       }
 
-      // Ú‘¿Ú‘¿ UMA optimistic oracle path Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+      //  UMA optimistic oracle path 
       // The request can be opened before the outcome is known; proposing and
       // settling happen on later cron ticks as the OOV2 state machine advances.
       // FALLBACK: if UMA processing fails (RPC down, timeout, etc.) or returns
@@ -4475,11 +4499,11 @@ async function checkAndResolveMarkets() {
         try {
           umaResult = await processUmaMarket(market, outcome);
         } catch (e) {
-          console.error(`[UMA] processing failed for ${market.slug}: ${e.message} Ú¿‘ falling back to direct resolve`);
+          console.error(`[UMA] processing failed for ${market.slug}: ${e.message}  falling back to direct resolve`);
           umaResult = 'fallback';
         }
         if (umaResult === 'pending') {
-          console.log(`[UMA] ${market.slug} still pending Ú¿‘ will check again next cycle`);
+          console.log(`[UMA] ${market.slug} still pending  will check again next cycle`);
           continue;
         }
         if (umaResult === 'resolved') {
@@ -4505,11 +4529,11 @@ async function checkAndResolveMarkets() {
             const entry = deployedMarketsCache.get(market.slug);
             if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
             eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
-            console.log(`Ú‹≈ [UMA] Market ${market.slug} settled via Optimistic Oracle: ${outcomeOnChain ? 'YES' : 'NO'}`);
+            console.log(` [UMA] Market ${market.slug} settled via Optimistic Oracle: ${outcomeOnChain ? 'YES' : 'NO'}`);
           }
           continue;
         }
-        // umaResult === 'fallback' Ú∆“ market predates UMA registration; resolve directly below.
+        // umaResult === 'fallback'  market predates UMA registration; resolve directly below.
       }
 
       if (outcome === null) {
@@ -4545,9 +4569,9 @@ async function checkAndResolveMarkets() {
         await publicClient.waitForTransactionReceipt({ hash });
       } catch (resolveErr) {
         // If the market is already resolved on-chain, the contract reverts.
-        // Don't spam the error log Ú¿‘ mark it as resolved and move on.
+        // Don't spam the error log  mark it as resolved and move on.
         if (/already resolved/i.test(resolveErr.message || '') || /resolved/i.test(resolveErr.shortMessage || '')) {
-          console.log(`[resolve] ${market.slug} was already resolved on-chain Ú¿‘ marking in cache`);
+          console.log(`[resolve] ${market.slug} was already resolved on-chain  marking in cache`);
           const entry = deployedMarketsCache.get(market.slug);
           if (entry) { entry.resolved = true; entry.outcome = outcome; }
           await supabase.from('deployed_markets').update({ resolved: true, outcome }).eq('slug', market.slug);
@@ -4565,19 +4589,19 @@ async function checkAndResolveMarkets() {
       market.resolved = true;
       market.outcome = outcome;
       eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome });
-      console.log(`Ú‹≈ Deployed market ${market.slug} resolved successfully.`);
+      console.log(` Deployed market ${market.slug} resolved successfully.`);
     } catch (e) {
       console.error(`Failed to resolve market ${market.slug}:`, e.message);
     }
   }
 
-  // Ú‘¿Ú‘¿ Post-cron Gamma health check Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+  //  Post-cron Gamma health check 
   // If Gamma API had a cluster of failures during this resolution run, alert
-  // via Sentry so the team knows Polymarket may be down Ú¿‘ instead of
+  // via Sentry so the team knows Polymarket may be down  instead of
   // discovering it when a user asks why nothing resolved for two days.
   const gammaFailures = drainConsecutiveFailures();
   if (gammaFailures >= 5) {
-    const msg = `Gamma API had ${gammaFailures} consecutive failures during resolution cron Ú¿‘ Polymarket may be down`;
+    const msg = `Gamma API had ${gammaFailures} consecutive failures during resolution cron  Polymarket may be down`;
     console.error(`[resolve] ${msg}`);
     captureException(new Error(msg), {
       cron: 'checkAndResolveMarkets',
@@ -4606,11 +4630,11 @@ function scheduleNextMarketResolution() {
   if (!Number.isFinite(nearest)) return;
   const delayMs = Math.max(0, (nearest - now) * 1000);
   // CRITICAL: when a market is past-deadline but not yet resolved on Polymarket,
-  // `nearest < now` Ú∆“ delayMs = 0 Ú∆“ the timer fires immediately Ú∆“ re-arms Ú∆“
+  // `nearest < now`  delayMs = 0  the timer fires immediately  re-arms 
   // infinite tight loop that starves the event loop (503 + 429 from Polymarket).
   // Enforce a MINIMUM 5-minute re-check delay so past-due markets are checked
   // periodically, not in a tight loop.
-  const MIN_RECHECK_MS = 2 * 60 * 1000; // 2 min Ú¿‘ faster resolution of past-due markets
+  const MIN_RECHECK_MS = 2 * 60 * 1000; // 2 min  faster resolution of past-due markets
   // Cap at 1h so a far-future deadline doesn't hold a stale timer.
   const cappedDelay = Math.max(MIN_RECHECK_MS, Math.min(delayMs, 60 * 60 * 1000));
   _resolutionTimer = setTimeout(() => {
@@ -4663,19 +4687,19 @@ async function warmupTopMarkets() {
 }
 
 
-// Ú‘¿Ú‘¿ Leaderboard & Profiles Service Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Leaderboard & Profiles Service 
 
 // In-memory leaderboard stats. The Supabase `leaderboard` table has a legacy
 // schema (wallet_address/pet_name/level/xp) we can't migrate via REST, so the
 // computed stats live here. Rebuilt at boot + every 10 minutes by the cron.
-const leaderboardStats = new Map(); // user_id Ú∆“ { volume, pnl, trades_count, win_rate, updated_at }
+const leaderboardStats = new Map(); // user_id  { volume, pnl, trades_count, win_rate, updated_at }
 
 async function updateLeaderboard() {
   console.log('Running leaderboard update...');
   try {
-    // Ú‘¿Ú‘¿ Memory-safe leaderboard rebuild Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+    //  Memory-safe leaderboard rebuild 
     // OLD approach: load ALL 21,000+ trades into a single array, then iterate.
-    // That spiked heap to 1174MB Ú∆“ R15 crash Ú∆“ Heroku restart loop.
+    // That spiked heap to 1174MB  R15 crash  Heroku restart loop.
     //
     // NEW approach: paginate + process page-by-page WITHOUT accumulating the
     // full array. Each page is grouped into userTrades, then the page is
@@ -4684,11 +4708,11 @@ async function updateLeaderboard() {
     const agentOwnerKey = (t) => {
       if (t.user_id === HOUSE_AGENT_USER) return HOUSE_AGENT_USER;
       if (typeof t.user_id === 'string' && t.user_id.startsWith('agent_swarm_')) return t.user_id;
-      const isAgentTrade = typeof t.question === 'string' && t.question.startsWith('®ﬂ‰÷ Agent:');
+      const isAgentTrade = typeof t.question === 'string' && t.question.startsWith(' Agent:');
       return isAgentTrade ? `agent_${t.user_id}` : t.user_id;
     };
 
-    const userTrades = new Map(); // userId Ú∆“ trades[] (only keeps trade refs, not full rows)
+    const userTrades = new Map(); // userId  trades[] (only keeps trade refs, not full rows)
     const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase
@@ -4702,7 +4726,7 @@ async function updateLeaderboard() {
         console.error('Failed to fetch trades for leaderboard:', error.message);
         return;
       }
-      // Process this page immediately Ú¿‘ group by user, then let GC reclaim the page
+      // Process this page immediately  group by user, then let GC reclaim the page
       for (const t of (data || [])) {
         if (!t.user_id) continue;
         const key = agentOwnerKey(t);
@@ -4713,7 +4737,7 @@ async function updateLeaderboard() {
     }
     
     // Batch-fetch all profiles ONCE to eliminate the N+1 Supabase query
-    // pattern (was: 1 query per user inside the loop Ú∆“ 100+ sequential calls).
+    // pattern (was: 1 query per user inside the loop  100+ sequential calls).
     const __allUserIds = [...userTrades.keys()];
     const __profilesBatch = new Map();
     for (let i = 0; i < __allUserIds.length; i += 100) {
@@ -4726,14 +4750,14 @@ async function updateLeaderboard() {
       } catch (_) { /* profiles table may not exist yet */ }
     }
     
-    // Process users CONCURRENTLY (bounded) Ú¿‘ per-user work is independent and
+    // Process users CONCURRENTLY (bounded)  per-user work is independent and
     // dominated by on-chain reads, so batching cuts the recompute from ~90s to a
-    // few seconds Ú∆“ fresher /versus + /stats. (P5)
+    // few seconds  fresher /versus + /stats. (P5)
     const __lbEntries = [...userTrades.entries()];
     const __LB_CONC = 6;
     const __computeUser = async ([userId, tradesList]) => {
       try {
-        if (isSeedWallet(userId)) return; // seed/liquidity wallet Ú¿‘ not a human trader, keep it off the board
+        if (isSeedWallet(userId)) return; // seed/liquidity wallet  not a human trader, keep it off the board
         let totalVolume = 0;
         let tradesCount = 0;
         let totalPnL = 0;
@@ -4884,7 +4908,7 @@ async function updateLeaderboard() {
           // board is explicitly "realized PnL on resolved markets"; including open
           // positions' mark-to-market (with a guessed LMSR b, and trade-derived
           // shares when an agent wallet isn't in the address cache) was mislabeled
-          // and noisy Ú¿‘ it let high-win-rate agents show a deeply negative total.
+          // and noisy  it let high-win-rate agents show a deeply negative total.
           if (resolved) totalPnL += marketPnL;
           
           // Win rate counts every market the user put money into:
@@ -4897,7 +4921,7 @@ async function updateLeaderboard() {
           }
         }
         
-        // Realized-only win rate Ú¿‘ consistent with the realized-only PnL above.
+        // Realized-only win rate  consistent with the realized-only PnL above.
         // If no markets resolved yet, show 0% (honest) rather than a mark-to-market
         // guess that can diverge wildly from the PnL number.
         const winRate = resolvedMarketsCount > 0
@@ -4918,7 +4942,7 @@ async function updateLeaderboard() {
               avatarUrl = existingProf.avatar_url;
             } else {
               avatarUrl = `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${userId}`;
-              // Queue insert (fire-and-forget Ú¿‘ don't block the rebuild)
+              // Queue insert (fire-and-forget  don't block the rebuild)
               supabase.from('profiles').insert({
                 user_id: userId,
                 display_name: displayName,
@@ -4962,7 +4986,7 @@ async function updateLeaderboard() {
     }
 
     // Seed every known agent into the leaderboard so they ALWAYS appear in /versus
-    // and the Creators board Ú¿‘ even if they haven't traded yet. Existing computed
+    // and the Creators board  even if they haven't traded yet. Existing computed
     // stats (set above) take precedence; this only fills in the gaps.
     const __zeroEntry = (uid) => ({
       user_id: uid, is_agent: true, volume: 0, pnl: 0,
@@ -4973,7 +4997,7 @@ async function updateLeaderboard() {
       for (const a of roster) {
         if (!leaderboardStats.has(a.user)) leaderboardStats.set(a.user, __zeroEntry(a.user));
       }
-      // House Pulse + Sage Ú¿‘ use literal strings (safe regardless of const TDZ)
+      // House Pulse + Sage  use literal strings (safe regardless of const TDZ)
       if (!leaderboardStats.has('house_pulse')) leaderboardStats.set('house_pulse', __zeroEntry('house_pulse'));
       if (!leaderboardStats.has('agent_sage')) leaderboardStats.set('agent_sage', __zeroEntry('agent_sage'));
     } catch (e) { console.warn('[leaderboard] roster seed error:', e.message); }
@@ -5009,7 +5033,7 @@ app.get('/api/refresh-leaderboard', async (req, res) => {
 });
 
 // In-memory leaderboard cache (60s TTL) to avoid Supabase rate limits
-const leaderboardCache = new Map(); // key: "sort:limit" Ú∆“ { data, ts }
+const leaderboardCache = new Map(); // key: "sort:limit"  { data, ts }
 const LEADERBOARD_CACHE_TTL = 60_000; // 60 seconds
 
 app.get('/api/leaderboard', async (req, res) => {
@@ -5030,7 +5054,7 @@ app.get('/api/leaderboard', async (req, res) => {
     }
     
     // Primary source: in-memory stats computed by the leaderboard cron
-    // (the Supabase `leaderboard` table has a legacy schema Ú¿‘ see updateLeaderboard)
+    // (the Supabase `leaderboard` table has a legacy schema  see updateLeaderboard)
     let leaderboardData = null;
     if (leaderboardStats.size > 0) {
       leaderboardData = Array.from(leaderboardStats.values())
@@ -5054,9 +5078,9 @@ app.get('/api/leaderboard', async (req, res) => {
           const userStats = {};
           for (const t of allTrades) {
             if (!t.user_id) continue;
-            if (isSeedWallet(t.user_id)) continue; // seed/liquidity wallet Ú¿‘ exclude
+            if (isSeedWallet(t.user_id)) continue; // seed/liquidity wallet  exclude
             // Same humans-vs-agents bucketing as the cron (see updateLeaderboard)
-            const isAgentTrade = typeof t.question === 'string' && t.question.startsWith('®ﬂ‰÷ Agent:');
+            const isAgentTrade = typeof t.question === 'string' && t.question.startsWith(' Agent:');
             const key = t.user_id === HOUSE_AGENT_USER
               ? HOUSE_AGENT_USER
               : (t.user_id.startsWith('agent_swarm_') ? t.user_id : (isAgentTrade ? `agent_${t.user_id}` : t.user_id));
@@ -5121,11 +5145,11 @@ app.get('/api/leaderboard', async (req, res) => {
         defaultName = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
         defaultAvatar = `https://api.dicebear.com/7.x/identicon/png?size=128&seed=${addr}`;
       } else if (row.user_id === HOUSE_AGENT_USER) {
-        defaultName = 'Pulse T¨ House Agent';
+        defaultName = 'Pulse T House Agent';
         defaultAvatar = `https://api.dicebear.com/7.x/bottts/png?size=128&seed=pulse-house`;
         erc8004Id = agentTokenIds.get(HOUSE_AGENT_KEY) ?? null;
       } else if (row.user_id?.startsWith('agent_swarm_')) {
-        // Swarm agents are first-class citizens Ú¿‘ use their OWN profile + identity.
+        // Swarm agents are first-class citizens  use their OWN profile + identity.
         defaultName = profile?.display_name || 'Puls Agent';
         defaultAvatar = profile?.avatar_url || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${row.user_id}`;
         erc8004Id = agentTokenIds.get(`agent_${row.user_id}`) ?? null;
@@ -5269,8 +5293,8 @@ app.post('/api/profile/update', authenticateUser, strictLimiter, async (req, res
     if (error) {
       // If profiles table doesn't exist yet, return ok with warning
       if (error.message?.includes('schema cache') || error.message?.includes('does not exist')) {
-        console.warn('Profile update skipped Ú¿‘ profiles table not found.');
-        return res.json({ ok: true, warning: 'Profile saved locally only Ú¿‘ profiles table pending migration.' });
+        console.warn('Profile update skipped  profiles table not found.');
+        return res.json({ ok: true, warning: 'Profile saved locally only  profiles table pending migration.' });
       }
       throw error;
     }
@@ -5280,16 +5304,16 @@ app.post('/api/profile/update', authenticateUser, strictLimiter, async (req, res
   }
 });
 
-// Ú‘¿Ú‘¿ Agentic Economy (ERC-8004 + autonomous trading) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Agentic Economy (ERC-8004 + autonomous trading) 
 
-// Agent LLM providers: primary + ordered fallbacks. Configure via env Ú¿‘
+// Agent LLM providers: primary + ordered fallbacks. Configure via env 
 // AGENT_LLM_URL / AGENT_LLM_KEY / AGENT_MODEL is the primary; numbered suffixes
-// _2, _3, Ú¿Ê add fallbacks tried in order. A provider is skipped unless it has a
-// URL, key AND model. URLs may be a base ("Ú¿Ê/v1") Ú¿‘ "/chat/completions" is
+// _2, _3,  add fallbacks tried in order. A provider is skipped unless it has a
+// URL, key AND model. URLs may be a base ("/v1")  "/chat/completions" is
 // appended automatically when missing. All keys live in .env, never in the repo.
 function buildLlmProviders(base = 'AGENT_LLM', modelBase = 'AGENT_MODEL') {
   const list = [];
-  // '', _2 Ú¿Ê _50 Ú¿‘ room for many fallback providers and rotating keys.
+  // '', _2  _50  room for many fallback providers and rotating keys.
   for (const sfx of ['', ...Array.from({ length: 49 }, (_, i) => `_${i + 2}`)]) {
     let url = (process.env[`${base}_URL${sfx}`] || '').trim();
     const key = (process.env[`${base}_KEY${sfx}`] || '').trim();
@@ -5312,21 +5336,21 @@ function buildLlmProviders(base = 'AGENT_LLM', modelBase = 'AGENT_MODEL') {
 }
 const LLM_PROVIDERS = buildLlmProviders();
 // Optional separate "heavy" pool of reasoning models for the daily blog
-// analysis Ú¿‘ where depth matters and latency doesn't. Configured via
-// AGENT_HEAVY_URL/KEY + AGENT_HEAVY_MODEL (and _2, _3 Ú¿Ê). The trading loop never
+// analysis  where depth matters and latency doesn't. Configured via
+// AGENT_HEAVY_URL/KEY + AGENT_HEAVY_MODEL (and _2, _3 ). The trading loop never
 // uses these (they'd be slow + emit verbose reasoning, not clean JSON).
 const LLM_HEAVY_PROVIDERS = buildLlmProviders('AGENT_HEAVY', 'AGENT_HEAVY_MODEL');
 const llmHeavyCooldown = new Map();
 const LLM_TIMEOUT_MS = parseInt(process.env.AGENT_LLM_TIMEOUT_MS || '60000', 10);
 // Heavy reasoning models (the blog/analysis pool) are large + slow and emit long
-// outputs, so they get a very long per-attempt timeout Ú¿‘ the blog runs in the
+// outputs, so they get a very long per-attempt timeout  the blog runs in the
 // background and isn't user-facing, so we let the big reasoning models take as
 // long as they need (10 min default). Falls back to the fast pool only if they
 // still fail. Tunable via AGENT_HEAVY_TIMEOUT_MS.
 const LLM_HEAVY_TIMEOUT_MS = parseInt(process.env.AGENT_HEAVY_TIMEOUT_MS || '600000', 10);
 const LLM_RETRIES = Math.max(1, parseInt(process.env.AGENT_LLM_RETRIES || '1', 10)); // attempts per provider
 // After a provider hits a rate-limit/quota/overload error, skip it for this
-// long Ú¿‘ stops hammering exhausted keys (frees the 1-vCPU box) and rotates to a
+// long  stops hammering exhausted keys (frees the 1-vCPU box) and rotates to a
 // fresh key/provider. With many keys configured this gives big effective
 // throughput without 429 spam.
 const LLM_COOLDOWN_MS = parseInt(process.env.AGENT_LLM_COOLDOWN_MS || '90000', 10);
@@ -5334,10 +5358,10 @@ const llmCooldownUntil = new Map(); // provider index -> timestamp to skip until
 if (LLM_PROVIDERS.length === 0) {
   console.warn('[llm] No agent LLM providers configured (set AGENT_LLM_URL/KEY/MODEL).');
 } else {
-  console.log(`[llm] ${LLM_PROVIDERS.length} provider(s): ${LLM_PROVIDERS.map(p => `${p.model}${p.format !== 'openai' ? `(${p.format})` : ''}`).join(' Ú∆“ ')}`);
+  console.log(`[llm] ${LLM_PROVIDERS.length} provider(s): ${LLM_PROVIDERS.map(p => `${p.model}${p.format !== 'openai' ? `(${p.format})` : ''}`).join('  ')}`);
 }
 if (LLM_HEAVY_PROVIDERS.length) {
-  console.log(`[llm] ${LLM_HEAVY_PROVIDERS.length} heavy provider(s): ${LLM_HEAVY_PROVIDERS.map(p => p.model).join(' Ú∆“ ')}`);
+  console.log(`[llm] ${LLM_HEAVY_PROVIDERS.length} heavy provider(s): ${LLM_HEAVY_PROVIDERS.map(p => p.model).join('  ')}`);
 }
 const IDENTITY_REGISTRY = '0x8004A818BFB912233c491871b3d84c89A494BD9e';
 const REPUTATION_REGISTRY = '0x8004B663056A597Dffe9eCcC1965A193B7388713';
@@ -5355,7 +5379,7 @@ const registeredAgents = new Set();
 const agentTokenIds = new Map();   // agentKey -> ERC-8004 token id (string)
 const agentRepCount = new Map();   // agentKey -> number of reputation events recorded
 
-// Ú‘¿Ú‘¿ ERC-8004 identity helpers Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  ERC-8004 identity helpers 
 // IdentityRegistry is ERC-721 (balanceOf works) but NOT Enumerable
 // (tokenOfOwnerByIndex/totalSupply revert), so we can cheaply ask "does this
 // address already own an identity?" but must read the mint event to learn the id.
@@ -5365,11 +5389,11 @@ const IDENTITY_ERC721_ABI = [{
 }];
 
 // Re-mint guard: true iff the address already holds >=1 ERC-8004 identity. This
-// is what makes registration idempotent ACROSS RESTARTS Ú¿‘ the in-memory guard
+// is what makes registration idempotent ACROSS RESTARTS  the in-memory guard
 // (registeredAgents / s.registered) is reset each process, but balanceOf is the
 // durable on-chain source of truth. Without this, an agent whose original mint
 // is older than the event-scan window gets re-registered (a NEW token id, wasted
-// USDC gas) on every restart Ú¿‘ which is why the swarm's "8004 id" kept changing.
+// USDC gas) on every restart  which is why the swarm's "8004 id" kept changing.
 async function agentHasIdentity(agentAddress) {
   if (!agentAddress) return false;
   try {
@@ -5384,7 +5408,7 @@ async function agentHasIdentity(agentAddress) {
 }
 
 // Durable token-id store (optional `agent_identities` table). Silent no-op until
-// the table is created (migrations/2026-06-28-agent-identities.sql) Ú¿‘ the event
+// the table is created (migrations/2026-06-28-agent-identities.sql)  the event
 // scan still works meanwhile, so the fix is safe to deploy before the migration.
 async function getPersistedTokenId(agentKey) {
   try {
@@ -5399,11 +5423,11 @@ async function persistTokenId(agentKey, tokenId, address) {
     await supabase.from('agent_identities').upsert({
       agent_key: agentKey, token_id: String(tokenId), address: address || null, updated_at: new Date().toISOString(),
     });
-  } catch { /* table may not exist yet Ú¿‘ ignore */ }
+  } catch { /* table may not exist yet  ignore */ }
 }
 
 // Resolve an agent's ERC-8004 token id, STABLE across restarts:
-//   in-memory cache Ú∆“ durable store Ú∆“ bounded backward scan of mint events.
+//   in-memory cache  durable store  bounded backward scan of mint events.
 // Once found, the id is persisted so it never churns even after the mint ages
 // out of the scan window. Returns the most recent mint (matches what was shown).
 const ERC8004_SCAN_CHUNK = 9000n;            // per-call getLogs range (RPC caps ~10k)
@@ -5436,7 +5460,7 @@ async function resolveAgentTokenId(agentKey, agentAddress) {
   return null;
 }
 
-// Record ERC-8004 reputation from the ADMIN wallet (an independent validator Ú¿‘
+// Record ERC-8004 reputation from the ADMIN wallet (an independent validator 
 // ERC-8004 forbids an agent owner from rating its own agent). score 0..100.
 async function recordAgentReputation(agentKey, agentAddress, score, tag) {
   try {
@@ -5474,7 +5498,7 @@ async function llmCompleteOne(provider, messages, signal) {
 
 // Cohere Chat API (v2). URL is the base ("https://api.cohere.com") or full
 // "/v2/chat"; messages map 1:1 (system/user/assistant). Response content is an
-// array of typed blocks Ú∆“ join the text parts.
+// array of typed blocks  join the text parts.
 async function llmCompleteCohere(provider, messages, signal) {
   let url = provider.url;
   if (!/\/v\d\/chat/.test(url)) url = url.replace(/\/(chat\/)?completions\/?$/, '').replace(/\/+$/, '') + '/v2/chat';
@@ -5506,14 +5530,14 @@ async function llmCompleteOllama(provider, messages, signal) {
   return String(j.message?.content || '').trim();
 }
 
-// Google Gemini (generativelanguage API) Ú¿‘ different endpoint shape & auth.
+// Google Gemini (generativelanguage API)  different endpoint shape & auth.
 // Maps OpenAI-style messages to Gemini "contents" + systemInstruction.
 async function llmCompleteGemini(provider, messages, signal) {
   const sys = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
   const contents = messages
     .filter(m => m.role !== 'system')
     .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: String(m.content ?? '') }] }));
-  // URL may be a base ("Ú¿Ê/v1beta") or a full ":generateContent" Ú¿‘ normalise.
+  // URL may be a base ("/v1beta") or a full ":generateContent"  normalise.
   let url = provider.url;
   if (!/:generateContent/.test(url)) {
     url = url.replace(/\/+$/, '') + `/models/${provider.model}:generateContent`;
@@ -5572,14 +5596,14 @@ async function llmCompleteOpenAI(provider, messages, signal) {
     }
   }
   // Reasoning models stream their thinking in `reasoning_content` and may emit
-  // no `content` Ú¿‘ fall back to the reasoning so the heavy pool isn't empty.
+  // no `content`  fall back to the reasoning so the heavy pool isn't empty.
   return (out.trim() || reasoning.trim());
 }
 
-// Tries each configured provider in priority order (primary Ú∆“ fallbacks) with a
+// Tries each configured provider in priority order (primary  fallbacks) with a
 // per-attempt timeout and optional retries. Returns the first successful result.
 // `opts.prefer` (substring match on a provider model id) tries a preferred
-// provider FIRST Ú¿‘ this lets each swarm agent favour a distinct "brain" while
+// provider FIRST  this lets each swarm agent favour a distinct "brain" while
 // still falling back through the whole pool if it's down. Returns the text.
 async function llmComplete(messages, opts = {}) {
   const useHeavy = opts.heavy === true && LLM_HEAVY_PROVIDERS.length > 0;
@@ -5613,34 +5637,34 @@ async function llmComplete(messages, opts = {}) {
       } catch (e) {
         clearTimeout(timer);
         const reason = ac.signal.aborted ? `timeout after ${timeoutMs}ms` : (e.message || String(e));
-        // Rate-limited / quota / overloaded / depleted credits Ú∆“ cool this
+        // Rate-limited / quota / overloaded / depleted credits  cool this
         // provider down so the next calls rotate to a fresh key.
         if (/\b(429|503)\b|rate.?limit|quota|cost limit|too many|overloaded|capacity|depleted|credits? exhausted|insufficient.*credits?|balance.*low|out of credits|payment required|\b402\b/i.test(reason)) {
-          cooldown.set(idx, Date.now() + Math.max(LLM_COOLDOWN_MS, 30 * 60 * 1000)); // 30 min Ú¿‘ depleted credits won't recover fast
+          cooldown.set(idx, Date.now() + Math.max(LLM_COOLDOWN_MS, 30 * 60 * 1000)); // 30 min  depleted credits won't recover fast
           errors.push(`${provider.model}: ${reason}`);
           console.error(`[llm] provider (${provider.model}) attempt ${attempt}/${LLM_RETRIES} failed (COOLDOWN 30min): ${reason}`);
-          break; // don't retry this provider Ú¿‘ move to next one immediately
+          break; // don't retry this provider  move to next one immediately
         } else if (/\b(401|403)\b|forbidden|unauthorized|invalid.*api|api key/i.test(reason)) {
-          // Auth/forbidden Ú¿‘ e.g. a provider geo-blocks this server's IP or a dead
+          // Auth/forbidden  e.g. a provider geo-blocks this server's IP or a dead
           // key. Won't recover soon, so bench it ~30 min instead of hammering it on
-          // every request (this caused the 45+◊ 403 churn after the Netherlands move).
+          // every request (this caused the 45+ 403 churn after the Netherlands move).
           cooldown.set(idx, Date.now() + Math.max(LLM_COOLDOWN_MS, 30 * 60 * 1000));
           errors.push(`${provider.model}: ${reason}`);
           console.error(`[llm] provider (${provider.model}) attempt ${attempt}/${LLM_RETRIES} failed (AUTH COOLDOWN 30min): ${reason}`);
-          break; // don't retry Ú¿‘ move to next provider
+          break; // don't retry  move to next provider
         } else if (/\b(400|404|408|500|502|504)\b|bad request|not found|gateway|service unavailable/i.test(reason)) {
-          // Other HTTP errors Ú¿‘ short cooldown (5 min), might be transient.
+          // Other HTTP errors  short cooldown (5 min), might be transient.
           cooldown.set(idx, Date.now() + 5 * 60 * 1000);
           errors.push(`${provider.model}: ${reason}`);
           console.error(`[llm] provider (${provider.model}) attempt ${attempt}/${LLM_RETRIES} failed (COOLDOWN 5min): ${reason}`);
-          break; // don't retry Ú¿‘ move to next provider
+          break; // don't retry  move to next provider
         }
         errors.push(`${provider.model}: ${reason}`);
         console.error(`[llm] provider (${provider.model}) attempt ${attempt}/${LLM_RETRIES} failed: ${reason}`);
       }
     }
   }
-  throw new Error(`All LLM providers failed Ú∆“ ${errors.join(' | ')}`);
+  throw new Error(`All LLM providers failed  ${errors.join(' | ')}`);
 }
 
 // The Puls app renders Telegram/Slack-style markdown where a SINGLE asterisk = bold.
@@ -5649,13 +5673,13 @@ async function llmComplete(messages, opts = {}) {
 function formatForApp(text) {
   if (!text || typeof text !== 'string') return text;
   return text
-    // ATX headings (#, ##, ### Ú¿Ê) Ú∆“ a bold line
+    // ATX headings (#, ##, ### )  a bold line
     .replace(/^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$/gm, '*$1*')
-    // bold+italic ***x*** Ú∆“ *x*
+    // bold+italic ***x***  *x*
     .replace(/\*\*\*([^\n*][^\n]*?)\*\*\*/g, '*$1*')
-    // bold **x** Ú∆“ *x*
+    // bold **x**  *x*
     .replace(/\*\*([^\n*][^\n]*?)\*\*/g, '*$1*')
-    // __bold__ Ú∆“ *x*
+    // __bold__  *x*
     .replace(/__([^\n_][^\n]*?)__/g, '*$1*');
 }
 
@@ -5683,7 +5707,7 @@ app.post('/api/agent/start', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
     }
 
     // Fund the agent wallet from the user's wallet up to the requested budget.
-    // The agent's USDC balance IS the budget cap Ú¿‘ it cannot spend more than it holds.
+    // The agent's USDC balance IS the budget cap  it cannot spend more than it holds.
     const userWalletId = await getWalletId(userId);
     let funded = 0;
     if (userWalletId && budgetNum > 0) {
@@ -5854,7 +5878,7 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
 
 // Chat with the agent. The LLM returns a structured intent; the backend validates
 // The personal "My Agent" can BUY a signal on request: it pays the creator a
-// real USDC nanopayment from its OWN wallet (agentÚ∆“creator x402 on Arc) and
+// real USDC nanopayment from its OWN wallet (agentcreator x402 on Arc) and
 // returns the thesis. Picks the best buyable signal (most-unlocked, freshest);
 // skips its own, already-bought, over-budget, and resolved-market (stale) ones.
 async function buySignalForUserAgent(userId, agent, query) {
@@ -5874,7 +5898,7 @@ async function buySignalForUserAgent(userId, agent, query) {
       .select('signal_id').eq('user_id', agentUserId).in('signal_id', rows.map((r) => r.id));
     owned = new Set((mine || []).map((r) => r.signal_id));
   } catch (_) {}
-  // Drop signals whose market already resolved (stale alpha Ú¿‘ don't buy it).
+  // Drop signals whose market already resolved (stale alpha  don't buy it).
   const slugs = [...new Set(rows.map((r) => r.market_slug).filter(Boolean))];
   const resolved = new Set();
   try {
@@ -5887,7 +5911,7 @@ async function buySignalForUserAgent(userId, agent, query) {
   let cand = rows.filter((r) => !owned.has(r.id)
     && (Number(r.price_usdc) || 0) <= remaining
     && !(r.market_slug && resolved.has(r.market_slug)));
-  if (!cand.length) return { ok: false, reason: 'No buyable signals right now Ú¿‘ all already bought, over my budget, or their markets have resolved.' };
+  if (!cand.length) return { ok: false, reason: 'No buyable signals right now  all already bought, over my budget, or their markets have resolved.' };
   const q = String(query || '').trim().toLowerCase();
   if (q && !['top', 'best', 'any', 'a', 'the', 'one', 'signal', 'alpha', 'forecast'].includes(q)) {
     const matched = cand.filter((r) => `${r.title} ${r.market_question || ''}`.toLowerCase().includes(q));
@@ -5900,7 +5924,7 @@ async function buySignalForUserAgent(userId, agent, query) {
   if (!creatorWalletId && /agent/i.test(signal.creator_user_id)) creatorWalletId = await getWalletId(`agent_${signal.creator_user_id}`);
   const creatorInfo = creatorWalletId ? await getWalletInfo(creatorWalletId) : null;
   const toAddr = creatorInfo?.address || (signal.creator_user_id.startsWith('eth_') ? signal.creator_user_id.slice(4) : null);
-  if (!toAddr) return { ok: false, reason: 'That signalÚ¿Ÿs creator has no payout wallet yet Ú¿‘ try another.' };
+  if (!toAddr) return { ok: false, reason: 'That signals creator has no payout wallet yet  try another.' };
   const price = Number(signal.price_usdc) || 0.001;
   let txId = null;
   try {
@@ -5930,8 +5954,8 @@ async function buySignalForUserAgent(userId, agent, query) {
   return { ok: true, signal, price, txId };
 }
 
-// Execute ONE market buy from the agent's wallet (deploy-on-demand Ú∆“ approve Ú∆“
-// buyYes/buyNo Ú∆“ poll). Returns a result object (no res.json) so it's safe to
+// Execute ONE market buy from the agent's wallet (deploy-on-demand  approve 
+// buyYes/buyNo  poll). Returns a result object (no res.json) so it's safe to
 // call in a loop for multi-market requests.
 async function execAgentTrade(userId, agent, market, side, amount) {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -5981,7 +6005,7 @@ async function execAgentTrade(userId, agent, market, side, amount) {
     if (['FAILED', 'DENIED', 'CANCELLED'].includes(finalState)) return { ok: false, error: `on-chain ${finalState.toLowerCase()}` };
     await saveTrade(userId, {
       tx_id: circleId, side, usdc_amount: amount, entry_price: 0.5,
-      question: `®ﬂ‰÷ Agent: ${market.question || market.slug}`, market_id: contractAddress,
+      question: ` Agent: ${market.question || market.slug}`, market_id: contractAddress,
       state: finalState === 'COMPLETE' ? 'COMPLETE' : 'INITIATED', tx_hash: txHash,
     });
     recordAgentReputation(`agent_${userId}`, agent.address, 90, 'successful_trade').catch(() => {});
@@ -6022,10 +6046,10 @@ function _matchScore(query, m) {
   let hit = 0; for (const w of words) if (hay.includes(w)) hit++;
   return hit / words.length;
 }
-// Resolve a market the agent NAMED (full question or slug) Ú¿‘ NOT limited to the
+// Resolve a market the agent NAMED (full question or slug)  NOT limited to the
 // chat feed. Tries the feed, then PULS's OWN deployed markets (the swarm creates
 // many crypto/WC markets), then a broad gamma search. Synonym-expands the query
-// (btcÚ∆“bitcoin, ro16Ú∆“round of 16, 100kÚ∆“100000) so casual phrasing still matches.
+// (btcbitcoin, ro16round of 16, 100k100000) so casual phrasing still matches.
 async function resolveMarketByName(name, feed) {
   const q0 = String(name || '').trim();
   if (!q0) return null;
@@ -6037,7 +6061,7 @@ async function resolveMarketByName(name, feed) {
   const consider = (m) => { const s = _matchScore(q, m); if (s > bestScore) { bestScore = s; best = m; } };
   for (const m of (feed || [])) consider(m);
   if (best && bestScore >= 0.6) return best;
-  // PULS's own deployed markets (agents create crypto/WC markets) Ú¿‘ fuzzy on question.
+  // PULS's own deployed markets (agents create crypto/WC markets)  fuzzy on question.
   try {
     const nowSec = Math.floor(Date.now() / 1000);
     const { data: dm } = await supabase.from('deployed_markets')
@@ -6105,14 +6129,14 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
         .order('created_at', { ascending: false })
         .limit(5);
       if (sigRows && sigRows.length) {
-        signalMenu = sigRows.map((s, i) => `${i + 1}. "${s.title}"${s.stance ? ` (${s.stance})` : ''} Ú¿‘ ${s.price_usdc} USDC`).join('\n');
+        signalMenu = sigRows.map((s, i) => `${i + 1}. "${s.title}"${s.stance ? ` (${s.stance})` : ''}  ${s.price_usdc} USDC`).join('\n');
       }
     } catch (e) {
       console.warn('[agent/chat] signal menu fetch error:', e.message);
     }
 
     // Vision: research the open web on the user's question so the agent reasons
-    // over real, current information (and can cite it) Ú¿‘ same rail the house
+    // over real, current information (and can cite it)  same rail the house
     // agent + market AI use. Best-effort; never blocks the chat.
     let research = { brief: '', sources: [] };
     try {
@@ -6121,9 +6145,9 @@ app.post('/api/agent/chat', apiKeyOrAuth, requireVerifiedUser, strictLimiter, as
       console.error('[agent/chat] research failed:', e.message);
     }
 
-    const sys = `You are Puls Agent, an autonomous trading agent on Arc Testnet with ${remaining.toFixed(2)} USDC to spend. You can analyze markets, trade prediction markets, and buy premium forecasts ("signals") from other agents Ú¿‘ paying in USDC on Arc.
-Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })} (UTC) Ú¿‘ reason about what is current; never treat a past date or already-finished event as upcoming.
-Live markets (numbered by popularity Ú¿‘ you may also name ANY other real prediction market by its full question and I will find + deploy it):
+    const sys = `You are Puls Agent, an autonomous trading agent on Arc Testnet with ${remaining.toFixed(2)} USDC to spend. You can analyze markets, trade prediction markets, and buy premium forecasts ("signals") from other agents  paying in USDC on Arc.
+Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })} (UTC)  reason about what is current; never treat a past date or already-finished event as upcoming.
+Live markets (numbered by popularity  you may also name ANY other real prediction market by its full question and I will find + deploy it):
 ${marketLines || '(none available)'}
 ${signalMenu ? `\nLive signals you can buy (numbered, newest first):\n${signalMenu}\n` : ''}
 ${research.brief ? `\nLive web research (reason over this, cite it in your reply):\n${research.brief}\n` : ''}
@@ -6134,7 +6158,7 @@ Each action is exactly one of:
 - {"type":"buy_signal","query":"<topic, or 'top' for the best one>","tradeUsdc":<number, optional>}                            // pay another forecaster for premium alpha (x402)
 Rules:
 - "top market" / "best one" / "first" / "#1" ALWAYS means market #1 in the numbered list above. For a signal, "top signal"/"best signal" means use query "top".
-- If the user wants to buy a signal AND bet/stake on its pick (e.g. "buy the top signal and put $2 on it", "buy $2 into its market"), return ONE buy_signal action with tradeUsdc set to the stake Ú¿‘ NOT a separate buy (you don't know the signal's market until it's bought; I reveal it and place the trade on the signal's side).
+- If the user wants to buy a signal AND bet/stake on its pick (e.g. "buy the top signal and put $2 on it", "buy $2 into its market"), return ONE buy_signal action with tradeUsdc set to the stake  NOT a separate buy (you don't know the signal's market until it's bought; I reveal it and place the trade on the signal's side).
 - If the user asks to buy SEVERAL markets in one message, return one "buy" action per market, each with its amount.
 - "market" may be ANY real prediction market the user names (e.g. "Will Spain reach the Round of 16 at the 2026 FIFA World Cup?", "Will BTC close above $100k by 2026-12-31"). Honor the amounts they give.
 - Decide YES/NO from your reasoning + the research (and any signal the user told you to act on).
@@ -6179,14 +6203,14 @@ Output ONLY the JSON object.`;
     for (const act of actions.slice(0, 6)) {
       const type = act.type || 'buy';
       if (type === 'buy_signal') {
-        if (budgetLeft < 0.001) { notes.push('Ú¿‚ skipped a signal Ú¿‘ no budget left'); continue; }
+        if (budgetLeft < 0.001) { notes.push(' skipped a signal  no budget left'); continue; }
         const r = await buySignalForUserAgent(userId, { ...agent, balance: budgetLeft }, resolvePositionalSignal(act.query || '', message));
         if (r.ok) {
           spentNow += r.price; budgetLeft -= r.price;
           const who = (String(r.signal.creator_user_id || '').replace(/^agent_(swarm_)?/, '').replace(/^./, (c) => c.toUpperCase())) || 'a forecaster';
           signalsBought.push({ id: r.signal.id, title: r.signal.title, price: r.price, txId: r.txId, stance: r.signal.stance || null, thesis: r.signal.thesis || null, marketQuestion: r.signal.market_question || null, marketSlug: r.signal.market_slug || null });
           // Follow through: if the user wants to STAKE on the signal's pick, the
-          // signal now reveals its market + side Ú¿‘ place that trade on-chain.
+          // signal now reveals its market + side  place that trade on-chain.
           const _stake = parseFloat(act.tradeUsdc ?? act.stakeUsdc ?? act.usdc);
           const _sigRef = r.signal.market_slug || r.signal.market_question || '';
           if (_stake > 0 && _sigRef && budgetLeft >= _stake - 1e-9) {
@@ -6194,26 +6218,26 @@ Output ONLY the JSON object.`;
             let _sm = resolvePositionalMarket(_sigRef, '', feed) || await resolveMarketByName(_sigRef, feed);
             if (_sm) {
               const _tr = await execAgentTrade(userId, agent, _sm, _sigSide, _stake);
-              if (_tr.ok) { spentNow += _stake; budgetLeft -= _stake; trades.push(_tr.trade); notes.push(`Ú¿‚ acted on it Ú¿‘ ${_sigSide} $${_stake} on "${_sm.question || _sm.slug}"`); }
-              else notes.push(`Ú¿‚ bought the signal but couldn't stake on its market Ú¿‘ ${_tr.error}`);
-            } else notes.push(`Ú¿‚ bought the signal; couldn't locate its market to stake $${_stake}`);
+              if (_tr.ok) { spentNow += _stake; budgetLeft -= _stake; trades.push(_tr.trade); notes.push(` acted on it  ${_sigSide} $${_stake} on "${_sm.question || _sm.slug}"`); }
+              else notes.push(` bought the signal but couldn't stake on its market  ${_tr.error}`);
+            } else notes.push(` bought the signal; couldn't locate its market to stake $${_stake}`);
           }
-          notes.push(`Ú¿‚ bought signal Ú¿‹${r.signal.title}Ú¿›${r.signal.stance ? ' (' + r.signal.stance + ')' : ''} from ${who} T¨ $${r.price.toFixed(3)} x402`);
-        } else notes.push(`Ú¿‚ couldn't buy a signal Ú¿‘ ${r.reason}`);
+          notes.push(` bought signal ${r.signal.title}${r.signal.stance ? ' (' + r.signal.stance + ')' : ''} from ${who} T $${r.price.toFixed(3)} x402`);
+        } else notes.push(` couldn't buy a signal  ${r.reason}`);
       } else {
         const amount = parseFloat(act.usdc ?? act.usdcAmount);
         const side = String(act.side || 'YES').toUpperCase() === 'NO' ? 'NO' : 'YES';
         const ref = act.market || act.slug || act.query || '';
-        if (!(amount > 0)) { notes.push(`Ú¿‚ skipped "${ref}" Ú¿‘ no amount given`); continue; }
-        if (amount > budgetLeft + 1e-9) { notes.push(`Ú¿‚ skipped "${ref}" Ú¿‘ $${amount} over my remaining $${budgetLeft.toFixed(2)}`); continue; }
-        // Positional refs ("top market", "best one", "#1") Ú∆“ feed[0] deterministically,
+        if (!(amount > 0)) { notes.push(` skipped "${ref}"  no amount given`); continue; }
+        if (amount > budgetLeft + 1e-9) { notes.push(` skipped "${ref}"  $${amount} over my remaining $${budgetLeft.toFixed(2)}`); continue; }
+        // Positional refs ("top market", "best one", "#1")  feed[0] deterministically,
         // so the agent doesn't say "I can't find a market named 'top market'".
         let market = resolvePositionalMarket(ref, message, feed);
         if (!market) market = await resolveMarketByName(ref, feed);
-        if (!market) { notes.push(`Ú¿‚ couldn't find a market matching "${ref}"`); continue; }
+        if (!market) { notes.push(` couldn't find a market matching "${ref}"`); continue; }
         const r = await execAgentTrade(userId, agent, market, side, amount);
-        if (r.ok) { spentNow += amount; budgetLeft -= amount; trades.push(r.trade); notes.push(`Ú¿‚ ${side} $${amount} Ú∆“ Ú¿‹${market.question || market.slug}Ú¿›`); }
-        else notes.push(`Ú¿‚ "${market.question || market.slug}": ${r.error}`);
+        if (r.ok) { spentNow += amount; budgetLeft -= amount; trades.push(r.trade); notes.push(` ${side} $${amount}  ${market.question || market.slug}`); }
+        else notes.push(` "${market.question || market.slug}": ${r.error}`);
       }
     }
 
@@ -6250,7 +6274,7 @@ app.post('/api/copilot/chat', apiKeyOrAuth, strictLimiter, async (req, res) => {
     // model priors. Search the market question plus the user's message for focus.
     let research = { brief: '', sources: [] };
     try {
-      const q = [question, message].filter(Boolean).join(' Ú¿‘ ').slice(0, 200);
+      const q = [question, message].filter(Boolean).join('  ').slice(0, 200);
       research = await researchQuestion(q || question || message, 4);
     } catch (e) {
       console.error('[Copilot] research failed:', e.message);
@@ -6258,17 +6282,17 @@ app.post('/api/copilot/chat', apiKeyOrAuth, strictLimiter, async (req, res) => {
 
     const hasMarket = !!(question && String(question).trim());
     const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
-    const timeRule = `IMPORTANT Ú¿‘ today is ${today} (UTC). Treat ANY date before today as already in the PAST: never present a past match/event/result as "next" or "upcoming". For "next/upcoming" questions, pick the soonest one STRICTLY AFTER today, leaning on the live research for current schedules. If a stage/round has already finished by today, say so and move to what's actually next.
-GROUNDING Ú¿‘ state a concrete fact (opponent, date, time, venue, round, price, number) ONLY if it actually appears in the live research below, and cite it. Never invent or "best-guess" a specific fixture/date/venue: if the research doesn't clearly pin it down, say what you DO see and that the exact detail isn't confirmed there. A wrong specific is worse than an honest "not confirmed".`;
+    const timeRule = `IMPORTANT  today is ${today} (UTC). Treat ANY date before today as already in the PAST: never present a past match/event/result as "next" or "upcoming". For "next/upcoming" questions, pick the soonest one STRICTLY AFTER today, leaning on the live research for current schedules. If a stage/round has already finished by today, say so and move to what's actually next.
+GROUNDING  state a concrete fact (opponent, date, time, venue, round, price, number) ONLY if it actually appears in the live research below, and cite it. Never invent or "best-guess" a specific fixture/date/venue: if the research doesn't clearly pin it down, say what you DO see and that the exact detail isn't confirmed there. A wrong specific is worse than an honest "not confirmed".`;
     const sys = hasMarket
       ? `You are Puls AI Trading Copilot, an expert prediction market analyst.
 ${timeRule}
 You are helping the user analyze the following prediction market:
 - Question: "${question}"
 - Slug: "${slug || 'unknown-slug'}"
-- Current YES Price: ${currentYesPrice ? (parseFloat(currentYesPrice) * 100).toFixed(0) + 'T‚' : '50T‚'}
-- Current NO Price: ${currentNoPrice ? (parseFloat(currentNoPrice) * 100).toFixed(0) + 'T‚' : '50T‚'}
-${research.brief ? `\nLive web research (latest information Ú¿‘ base your answer on this, not assumptions):\n${research.brief}\n` : ''}
+- Current YES Price: ${currentYesPrice ? (parseFloat(currentYesPrice) * 100).toFixed(0) + 'T' : '50T'}
+- Current NO Price: ${currentNoPrice ? (parseFloat(currentNoPrice) * 100).toFixed(0) + 'T' : '50T'}
+${research.brief ? `\nLive web research (latest information  base your answer on this, not assumptions):\n${research.brief}\n` : ''}
 Your goals:
 1. Provide insight grounded in the research above and the current pricing. If the research is thin or doesn't cover the question, say so rather than inventing facts.
 2. Suggest trading strategies (e.g. buying YES vs buying NO depending on news/odds).
@@ -6276,13 +6300,13 @@ Your goals:
 4. Keep your replies helpful, concise (maximum 3 short paragraphs), and formatting clean. For bold use a SINGLE asterisk like *this* (never double **), and do not use markdown headings (#).
 5. If suggesting a trade, format the final recommendation on a new line like:
 [TRADE RECOMMENDATION]: BUY YES or BUY NO with short rationale.`
-      : `You are Puls AI Copilot, an expert assistant for prediction markets on Arc Ú¿‘ sharp on world events, sports, crypto and politics and how they map to markets.
-The user is chatting with you generally Ú¿‘ NO specific market is open Ú¿‘ so just answer their question directly and usefully.
+      : `You are Puls AI Copilot, an expert assistant for prediction markets on Arc  sharp on world events, sports, crypto and politics and how they map to markets.
+The user is chatting with you generally  NO specific market is open  so just answer their question directly and usefully.
 ${timeRule}
 ${research.brief ? `\nLive web research (base your answer on this current information, cite what you use):\n${research.brief}\n` : ''}
 Rules:
 - Answer the actual question specifically and helpfully, grounded in the research above.
-- Do NOT invent a market, a price (like 50T‚), an "Unknown Prediction", or a [TRADE RECOMMENDATION] Ú¿‘ there is no specific market selected here.
+- Do NOT invent a market, a price (like 50T), an "Unknown Prediction", or a [TRADE RECOMMENDATION]  there is no specific market selected here.
 - You MAY note what's worth watching or how an event could be traded on Puls, in plain language, without fabricated odds.
 - Keep it concise (max 3 short paragraphs). For bold use a SINGLE asterisk (*like this*), never double; no markdown headings (#).`;
 
@@ -6298,7 +6322,7 @@ Rules:
   }
 });
 
-// Ú‘¿Ú‘¿ Push Notifications & In-App Notifications Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Push Notifications & In-App Notifications 
 
 
 async function createNotification(userId, title, message, type) {
@@ -6408,7 +6432,7 @@ app.post('/api/notifications/mark-read', authenticateUser, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-// Ú‘¿Ú‘¿ User-to-User Messages Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  User-to-User Messages 
 
 // GET /api/messages
 app.get('/api/messages', authenticateUser, async (req, res) => {
@@ -6483,7 +6507,7 @@ app.post('/api/messages/:targetUserId', authenticateUser, strictLimiter, async (
   }
 });
 
-// Ú‘¿Ú‘¿ User-Created Markets Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  User-Created Markets 
 
 app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLimiter, async (req, res) => {
   try {
@@ -6562,7 +6586,7 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
     // Notify user
     createNotification(
       userId,
-      'Market Created ®ﬂŒ…',
+      'Market Created ',
       `Your custom market "${question}" has been deployed on Arc Testnet!`,
       'system'
     ).catch(console.error);
@@ -6576,7 +6600,7 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
   }
 });
 
-// Ú‘¿Ú‘¿ Limit Orders Engine Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Limit Orders Engine 
 
 // POST /api/trade/limit-order
 app.post('/api/trade/limit-order', authenticateUser, requireVerifiedUser, tradeLimiter, async (req, res) => {
@@ -6622,7 +6646,7 @@ app.post('/api/trade/limit-order', authenticateUser, requireVerifiedUser, tradeL
 
     createNotification(
       userId,
-      'Limit Order Placed ®ﬂŒÔ',
+      'Limit Order Placed ',
       `Placed limit ${type.toLowerCase()} order for ${side} at target price $${parseFloat(targetPrice).toFixed(2)}`,
       'limit_order'
     ).catch(console.error);
@@ -6675,7 +6699,7 @@ app.post('/api/trade/limit-order/cancel', authenticateUser, requireVerifiedUser,
 
     createNotification(
       userId,
-      'Order Cancelled ®ﬂ⁄Î',
+      'Order Cancelled ',
       `Limit order for ${data.side} at target price $${parseFloat(data.target_price).toFixed(2)} was cancelled.`,
       'limit_order'
     ).catch(console.error);
@@ -6687,7 +6711,7 @@ app.post('/api/trade/limit-order/cancel', authenticateUser, requireVerifiedUser,
 });
 
 // The Limit Orders Execution Engine. Triggered by trade:complete events (a
-// trade moves the pool price Ú∆“ re-evaluate pending orders for that market)
+// trade moves the pool price  re-evaluate pending orders for that market)
 // and once at boot via sweepPendingLimitOrders(). No polling.
 let _limitOrdersTableMissing = false;
 const _limitOrderChecksInFlight = new Set(); // marketId dedupe while a check runs
@@ -6757,13 +6781,13 @@ async function checkAndExecuteLimitOrders(filterMarketId) {
           continue;
         }
         
-        console.log(`®ﬂ‘Â Match found for order ${orderId}! Current ${side} price ${currentPrice.toFixed(4)} matches target ${parseFloat(targetPrice).toFixed(4)}.`);
+        console.log(` Match found for order ${orderId}! Current ${side} price ${currentPrice.toFixed(4)} matches target ${parseFloat(targetPrice).toFixed(4)}.`);
         
-        // CRITICAL: The atomic lock Ú¿‘ `UPDATE ... WHERE status='PENDING'` only
+        // CRITICAL: The atomic lock  `UPDATE ... WHERE status='PENDING'` only
         // affects a row still in PENDING. But Supabase returns `error: null`
         // even when 0 rows matched. Must check `data` to verify the lock was
         // actually acquired, otherwise two concurrent calls both "lock" and
-        // both execute Ú∆“ double buy.
+        // both execute  double buy.
         const { data: lockData, error: lockErr } = await supabase
           .from('limit_orders')
           .update({ status: 'EXECUTING' })
@@ -6772,9 +6796,9 @@ async function checkAndExecuteLimitOrders(filterMarketId) {
           .select('id');
 
         if (lockErr) continue;
-        // If 0 rows updated, another call already locked it Ú¿‘ skip.
+        // If 0 rows updated, another call already locked it  skip.
         if (!lockData || lockData.length === 0) {
-          console.log(`Order ${orderId} already locked by another call Ú¿‘ skipping.`);
+          console.log(`Order ${orderId} already locked by another call  skipping.`);
           continue;
         }
         // Evict from cache immediately so a concurrent trade:complete trigger
@@ -6826,7 +6850,7 @@ async function checkAndExecuteLimitOrders(filterMarketId) {
         
         const circleId = txRes.data.id;
         
-        // Ú‘¿Ú‘¿ INITIATE TRADE RECORD FOR LIMIT ORDER IDEMPOTENCY Ú‘¿Ú‘¿
+        //  INITIATE TRADE RECORD FOR LIMIT ORDER IDEMPOTENCY 
         const estimatedPayout = isBuy ? parseFloat(amount) : (parseFloat(shares) * currentPrice);
         let questionSlug = slug.split('-').join(' ');
         if (questionSlug.length > 0) {
@@ -6837,7 +6861,7 @@ async function checkAndExecuteLimitOrders(filterMarketId) {
           side,
           usdc_amount: isBuy ? estimatedPayout : -estimatedPayout,
           entry_price: currentPrice,
-          question: `®ﬂŒÔ Limit: ${questionSlug}`,
+          question: ` Limit: ${questionSlug}`,
           market_id: marketId,
           state: 'INITIATED',
         });
@@ -6879,7 +6903,7 @@ async function checkAndExecuteLimitOrders(filterMarketId) {
 
           createNotification(
             userId,
-            'Limit Order Triggered! Ú⁄·',
+            'Limit Order Triggered! ',
             `Your limit order to ${type.toLowerCase()} ${side} at $${parseFloat(targetPrice).toFixed(2)} was executed successfully on-chain!`,
             'limit_order'
           ).catch(console.error);
@@ -6899,7 +6923,7 @@ async function checkAndExecuteLimitOrders(filterMarketId) {
 
           createNotification(
             userId,
-            'Limit Order Failed Ú›Ã',
+            'Limit Order Failed ',
             `Your limit order to ${type.toLowerCase()} ${side} at $${parseFloat(targetPrice).toFixed(2)} failed to execute.`,
             'limit_order'
           ).catch(console.error);
@@ -6946,7 +6970,7 @@ eventBus.on(EVENTS.TRADE_CREATED, (t) => {
   if (t && t.market_id) scheduleLimitOrderCheck(t.market_id);
 });
 
-// Ú‘¿Ú‘¿ Support Tickets Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Support Tickets 
 
 app.get('/api/support/tickets', authenticateUser, async (req, res) => {
   try {
@@ -7044,13 +7068,13 @@ const PORT = process.env.PORT || 3000;
 await cache.hydrate(supabase);
 cache.subscribe();
 
-// Sentry error handler Ú¿‘ MUST be after all routes, before app.listen.
+// Sentry error handler  MUST be after all routes, before app.listen.
 // Captures unhandled exceptions in route handlers and forwards them as 500s.
 app.use(sentryErrorHandler);
 
-// Ú‘¿Ú‘¿ Global Express error handler Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Global Express error handler 
 // Catches any uncaught error from a route handler (sync or async via
-// asyncHandler). Returns a JSON error Ú¿‘ never a bare 500 HTML page.
+// asyncHandler). Returns a JSON error  never a bare 500 HTML page.
 app.use((err, req, res, _next) => {
   const isProd = process.env.NODE_ENV === 'production';
   console.error('[UNHANDLED ROUTE ERROR]', req.method, req.path, err?.message || err);
@@ -7070,11 +7094,11 @@ const server = app.listen(PORT, async () => {
   console.log(`[UMA] Optimistic Oracle resolution: ${UMA_RESOLUTION && UMA_ADAPTER_ADDRESS ? `ENABLED (adapter ${UMA_ADAPTER_ADDRESS}, oracle ${UMA_OOV2_ADDRESS})` : 'disabled (legacy direct resolve)'}`);
   console.log(`[Wallets] account type: ${WALLET_ACCOUNT_TYPE}; Circle webhook signature enforce: ${CIRCLE_WEBHOOK_ENFORCE}`);
   await loadDeployedMarkets();
-  // One-time sweep of time-due work Ú¿‘ DEFERRED by 30s so the HTTP server is
+  // One-time sweep of time-due work  DEFERRED by 30s so the HTTP server is
   // fully ready to accept traffic before any on-chain work begins.
-  // warmupTopMarkets() is DISABLED Ú¿‘ it deploys 20 markets sequentially at
+  // warmupTopMarkets() is DISABLED  it deploys 20 markets sequentially at
   // boot (each 5-10s of viem writeContract), totaling 2-3 minutes of blocked
-  // event loop Ú∆“ 503 + CORS errors on Heroku's 512MB dyno. Markets deploy
+  // event loop  503 + CORS errors on Heroku's 512MB dyno. Markets deploy
   // on-demand when users trade them anyway.
   setTimeout(() => {
     checkAndResolveMarkets().catch(console.error);
@@ -7103,30 +7127,30 @@ const server = app.listen(PORT, async () => {
     .catch(console.error);
 });
 
-// Ú‘¿Ú‘¿ Socket.IO gateway (replaces raw `ws` broadcast) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Socket.IO gateway (replaces raw `ws` broadcast) 
 // One gateway subscribes to the internal eventBus (lib/events.js) and
 // broadcasts every canonical event to connected Flutter / web clients.
 // `broadcastTrade` below emits TRADE_COMPLETE on the bus; the gateway picks
-// it up Ú¿‘ no manual `client.send(...)` loop needed.
+// it up  no manual `client.send(...)` loop needed.
 const io = initSocketIo(server);
 
-// Ú‘¿Ú‘¿ Raw `ws` gateway (backward-compat for existing feed clients) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Raw `ws` gateway (backward-compat for existing feed clients) 
 // Existing Flutter clients (feed_screen.dart, live_on_arc.dart) speak plain
 // WS, not Socket.IO. Keep them working; they consume TRADE_COMPLETE frames.
 const rawWs = initRawWs(server);
 
 function broadcastTrade(trade) {
-  // Fan out to the internal event bus Ú∆“ cache + agents + Socket.IO gateway
+  // Fan out to the internal event bus  cache + agents + Socket.IO gateway
   // + raw `ws` gateway all react. broadcastTrade is only called for COMPLETE
   // trades, so the bus event is TRADE_COMPLETE.
   eventBus.safeEmit(EVENTS.TRADE_COMPLETE, trade);
   console.log(`[broadcast] trade event: ${trade.id}`);
 }
 
-// Ú‘¿Ú‘¿ AI Finance Director (x402-paid, portfolio-aware) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  AI Finance Director (x402-paid, portfolio-aware) 
 // A premium agent that, for an x402 nanopayment, reads the user's whole
 // portfolio (balance + open positions + their own win/loss record) and returns
-// a STRUCTURED, risk-managed basket of +EV predicts sized to their balance Ú¿‘
+// a STRUCTURED, risk-managed basket of +EV predicts sized to their balance 
 // each with a direct app.pulsmarket.tech link. Replaces the old fake Arbitrage
 // preset. (Money-back AgentBond on the basket is Phase B.)
 const DIRECTOR_PRICE_USDC = parseFloat(process.env.DIRECTOR_PRICE_USDC || '0.5');
@@ -7153,7 +7177,7 @@ async function userPortfolioSnapshot(userId) {
       } else {
         held.add(contract.toLowerCase());
         if (out.openPositions.length < 12) {
-          out.openPositions.push({ slug: slug || null, side: t.side, title: String(t.question || '').replace(/^®ﬂ‰÷ Agent:\s*/, '').trim().slice(0, 80) });
+          out.openPositions.push({ slug: slug || null, side: t.side, title: String(t.question || '').replace(/^ Agent:\s*/, '').trim().slice(0, 80) });
         }
       }
     }
@@ -7172,14 +7196,14 @@ async function directorCandidates(snapshot, limit = 10) {
 }
 
 // Free teaser: shows what the Director can see (balance, record, how many picks)
-// WITHOUT the picks Ú¿‘ the value (the actual portfolio) is behind the paywall.
+// WITHOUT the picks  the value (the actual portfolio) is behind the paywall.
 app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, async (req, res) => {
   try {
     const userId = `supabase_${req.user.id}`;
     const snapshot = await userPortfolioSnapshot(userId);
     const cands = await directorCandidates(snapshot, 10);
     const wr = snapshot.record.winRate;
-    const teaser = `I can see your $${snapshot.balance.toFixed(2)} balance${wr != null ? ` and your ${wr}% win rate (${snapshot.record.wins}-${snapshot.record.losses})` : ''}. I found ${cands.length} +EV market${cands.length === 1 ? '' : 's'} to build you a structured, risk-managed portfolio${snapshot.openPositions.length ? `, and I can hedge your ${snapshot.openPositions.length} open position${snapshot.openPositions.length === 1 ? '' : 's'}` : ''}.${DIRECTOR_GUARANTEE_ENABLED ? ' Backed by a money-back guarantee Ú¿‘ if my basket loses, I refund your fee on Arc.' : ''} Unlock the full plan for $${DIRECTOR_PRICE_USDC.toFixed(2)}.`;
+    const teaser = `I can see your $${snapshot.balance.toFixed(2)} balance${wr != null ? ` and your ${wr}% win rate (${snapshot.record.wins}-${snapshot.record.losses})` : ''}. I found ${cands.length} +EV market${cands.length === 1 ? '' : 's'} to build you a structured, risk-managed portfolio${snapshot.openPositions.length ? `, and I can hedge your ${snapshot.openPositions.length} open position${snapshot.openPositions.length === 1 ? '' : 's'}` : ''}.${DIRECTOR_GUARANTEE_ENABLED ? ' Backed by a money-back guarantee  if my basket loses, I refund your fee on Arc.' : ''} Unlock the full plan for $${DIRECTOR_PRICE_USDC.toFixed(2)}.`;
     res.json({
       priceUsdc: DIRECTOR_PRICE_USDC,
       balance: snapshot.balance,
@@ -7195,7 +7219,7 @@ app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, as
 
 // Paid (x402): the full structured portfolio. Auth FIRST (whose portfolio),
 // then the paywall (settles the nanopayment), then the handler builds the plan.
-// Shared plan builder: portfolio snapshot Ú∆“ +EV candidates Ú∆“ LLM structured
+// Shared plan builder: portfolio snapshot  +EV candidates  LLM structured
 // basket sized to the user's investable balance. Returns the plan (no payment).
 async function buildDirectorPlan(userId, riskProfile) {
   const rp = ['safe', 'balanced', 'aggressive'].includes(String(riskProfile || '').toLowerCase())
@@ -7208,19 +7232,19 @@ async function buildDirectorPlan(userId, riskProfile) {
   if (!cands.length || investable < 0.1) {
     return {
       ok: true, riskProfile: rp, snapshot: snap, picks: [], totalStakeUsdc: 0,
-      summary: !cands.length ? 'No markets clear my +EV bar right now Ú¿‘ holding cash is the right call. Check back soon.' : 'Your investable balance is too low to size a safe basket Ú¿‘ top up and I will build one.',
-      riskNote: 'Prediction markets are uncertain Ú¿‘ never stake more than you can lose.',
+      summary: !cands.length ? 'No markets clear my +EV bar right now  holding cash is the right call. Check back soon.' : 'Your investable balance is too low to size a safe basket  top up and I will build one.',
+      riskNote: 'Prediction markets are uncertain  never stake more than you can lose.',
       expectedWinRate: null, disclaimer, generatedAt: new Date().toISOString(),
     };
   }
   const sys = `You are the Puls Finance Director, an autonomous portfolio strategist on the Puls prediction market (Arc Testnet, USDC). Build a STRUCTURED, risk-managed portfolio for THIS user using ONLY the candidate markets provided. Honor the risk profile: safe = favour high-probability favourites (high win-rate, smaller edge); aggressive = favour higher-edge / more contrarian calls (lower win-rate, bigger payoff); balanced = a mix. Size each position in USDC from their investable balance, NEVER exceeding it, and keep some dry powder. Tier each pick: "core" (safe anchor), "satellite" (edge play), or "hedge" (offsets the user's existing open exposure). STRICT JSON only: {"summary":"<2-3 sentences addressed to the user, reference their balance/record>","picks":[{"slug":"<one of the candidate slugs>","side":"YES"|"NO","sizeUsdc":<number>,"tier":"core"|"satellite"|"hedge","rationale":"<1 sentence, cite the consensus probability>"}],"expectedWinRate":<integer 0-100>,"riskNote":"<1 honest risk caveat>"}`;
   const recordLine = snapshot.record.resolved
-    ? `The user's own record so far: ${snapshot.record.wins}-${snapshot.record.losses} (${snapshot.record.winRate}% win rate) Ú¿‘ tailor the plan to improve it.`
-    : `The user has no settled trades yet Ú¿‘ keep it approachable.`;
+    ? `The user's own record so far: ${snapshot.record.wins}-${snapshot.record.losses} (${snapshot.record.winRate}% win rate)  tailor the plan to improve it.`
+    : `The user has no settled trades yet  keep it approachable.`;
   const openLine = snapshot.openPositions.length
     ? `User's OPEN positions (consider hedging; do not blindly double up): ${snapshot.openPositions.map((p) => `${p.title} (${p.side})`).join('; ')}.`
     : 'User has no open positions.';
-  const candText = cands.map((c, i) => `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus ${(c.pmYes * 100).toFixed(0)}T‚ YES | leans ${c.side} | conviction ${(c.conviction * 100).toFixed(0)}%`).join('\n');
+  const candText = cands.map((c, i) => `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus ${(c.pmYes * 100).toFixed(0)}T YES | leans ${c.side} | conviction ${(c.conviction * 100).toFixed(0)}%`).join('\n');
   const usr = `Risk profile: ${rp}. Investable balance: $${investable.toFixed(2)} USDC.\n${recordLine}\n${openLine}\n\nCandidate markets:\n${candText}`;
   let parsed = null;
   try {
@@ -7259,7 +7283,7 @@ async function buildDirectorPlan(userId, riskProfile) {
     summary: parsed?.summary ? formatForApp(String(parsed.summary).slice(0, 600)) : 'Here is a structured, risk-managed basket sized to your balance.',
     picks, totalStakeUsdc: Math.round(total * 100) / 100,
     expectedWinRate: Number.isFinite(parsed?.expectedWinRate) ? Math.max(0, Math.min(100, Math.round(parsed.expectedWinRate))) : null,
-    riskNote: parsed?.riskNote ? String(parsed.riskNote).slice(0, 240) : 'Prediction markets are uncertain Ú¿‘ never stake more than you can lose.',
+    riskNote: parsed?.riskNote ? String(parsed.riskNote).slice(0, 240) : 'Prediction markets are uncertain  never stake more than you can lose.',
     disclaimer, generatedAt: new Date().toISOString(),
   };
 }
@@ -7267,7 +7291,7 @@ async function buildDirectorPlan(userId, riskProfile) {
 // External agents / SDK pay with a client-signed x402 nanopayment.
 app.post('/api/agent/director',
   authenticateUser, requireVerifiedUser,
-  x402Paywall('$' + DIRECTOR_PRICE_USDC, '/api/agent/director', { description: 'Puls Finance Director Ú¿‘ a structured, risk-managed prediction portfolio sized to your balance' }),
+  x402Paywall('$' + DIRECTOR_PRICE_USDC, '/api/agent/director', { description: 'Puls Finance Director  a structured, risk-managed prediction portfolio sized to your balance' }),
   async (req, res) => {
     try {
       const plan = await buildDirectorPlan(`supabase_${req.user.id}`, req.body?.riskProfile);
@@ -7278,7 +7302,7 @@ app.post('/api/agent/director',
 
 // In-app path: developer-controlled wallets can't client-sign x402, so we charge
 // the user's Circle wallet server-side (mirrors signal unlock), then build the
-// plan. Gated by DIRECTOR_PAID_ENABLED (off Ú∆“ free, for demos).
+// plan. Gated by DIRECTOR_PAID_ENABLED (off  free, for demos).
 const DIRECTOR_PAID_ENABLED = String(process.env.DIRECTOR_PAID_ENABLED ?? 'true').toLowerCase() !== 'false';
 // Money-back guarantee: if the recommended basket LOSES once its markets resolve,
 // the Director refunds the fee on Arc (reconcileDirectorPlans, below). Skin in
@@ -7296,7 +7320,7 @@ app.post('/api/agent/director/order', authenticateUser, requireVerifiedUser, str
       const info = await getWalletInfo(wid);
       payerAddr = info.address || null;
       if (parseFloat(info.usdcBalance) < DIRECTOR_PRICE_USDC) {
-        return res.status(402).json({ error: `Insufficient USDC Ú¿‘ need $${DIRECTOR_PRICE_USDC.toFixed(2)} to unlock the Finance Director.` });
+        return res.status(402).json({ error: `Insufficient USDC  need $${DIRECTOR_PRICE_USDC.toFixed(2)} to unlock the Finance Director.` });
       }
       try {
         const amountMicro = Math.round(DIRECTOR_PRICE_USDC * 1_000_000).toString();
@@ -7333,7 +7357,7 @@ app.post('/api/agent/director/order', authenticateUser, requireVerifiedUser, str
 
 // Money-back reconciler: when a paid basket's markets have ALL resolved, settle
 // it. If it lost (more losing picks than winning), refund the fee to the user on
-// Arc Ú¿‘ the Director's skin in the game. Decoupled, gated, idempotent, capped.
+// Arc  the Director's skin in the game. Decoupled, gated, idempotent, capped.
 async function reconcileDirectorPlans() {
   if (!DIRECTOR_GUARANTEE_ENABLED || !walletClient) return;
   try {
@@ -7380,7 +7404,7 @@ async function reconcileDirectorPlans() {
       if (lost && refundTx && m.user) {
         await supabase.from('notifications').insert({
           user_id: m.user, title: 'Finance Director refund', type: 'agent_decision', read: false,
-          message: JSON.stringify({ action: 'director_refund', agentName: 'Finance Director', amount: m.feeUsdc, txHash: refundTx, reasoning: `My basket came up short (${wins}-${losses}). As promised, I refunded your $${Number(m.feeUsdc).toFixed(2)} fee Ú¿‘ settled on Arc.` }),
+          message: JSON.stringify({ action: 'director_refund', agentName: 'Finance Director', amount: m.feeUsdc, txHash: refundTx, reasoning: `My basket came up short (${wins}-${losses}). As promised, I refunded your $${Number(m.feeUsdc).toFixed(2)} fee  settled on Arc.` }),
         });
       }
       console.log(`[director] plan ${row.id} settled: ${lost ? 'REFUNDED' : 'won'} (${wins}-${losses})${refundTx ? ' tx ' + refundTx : ''}`);
@@ -7405,7 +7429,7 @@ if (DIRECTOR_GUARANTEE_ENABLED) {
   setTimeout(() => reconcileDirectorPlans().catch(() => {}), 60_000).unref?.();
 }
 
-// Director track record (clients won vs refunded) Ú¿‘ social proof for the paid agent.
+// Director track record (clients won vs refunded)  social proof for the paid agent.
 app.get('/api/agent/director/record', async (_req, res) => {
   try {
     const { data: rows } = await supabase.from('x402_payments').select('raw').eq('endpoint', 'director').limit(1000);
@@ -7422,7 +7446,7 @@ app.get('/api/agent/director/record', async (_req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Ú‘¿Ú‘¿ Agent Strategies Engine (Arbitrage & DCA) Ú‘¿Ú‘¿
+//  Agent Strategies Engine (Arbitrage & DCA) 
 const agentStrategies = new Map(); // userId -> strategy string ('NONE', 'ARBITRAGE', 'DCA')
 
 async function getAgentStrategy(userId) {
@@ -7555,7 +7579,7 @@ async function executeArbitrageStrategy(userId, agentWalletId, balance) {
     // confident call (conviction = distance from a coin-flip), instead of
     // trading an on-chain-vs-Polymarket difference that would be a testnet
     // artifact and look broken.
-    const conviction = Math.abs(pmYesPrice - 0.5) * 2; // 0Ú¿Ê1
+    const conviction = Math.abs(pmYesPrice - 0.5) * 2; // 01
     let sideToBuy = null;
     if (conviction >= 0.3) {
       sideToBuy = pmYesPrice >= 0.5 ? 'YES' : 'NO';
@@ -7564,14 +7588,14 @@ async function executeArbitrageStrategy(userId, agentWalletId, balance) {
     if (sideToBuy) {
       const buyAmount = 1.0;
       const consensus = sideToBuy === 'YES' ? pmYesPrice : 1 - pmYesPrice;
-      console.log(`Consensus trade: ${market.slug} ${sideToBuy} (consensus ${(consensus * 100).toFixed(0)}T‚, conviction ${(conviction * 100).toFixed(0)}%). Buying $1.`);
+      console.log(`Consensus trade: ${market.slug} ${sideToBuy} (consensus ${(consensus * 100).toFixed(0)}T, conviction ${(conviction * 100).toFixed(0)}%). Buying $1.`);
 
       const success = await executeAgentTrade(userId, agentWalletId, market.contractAddress, sideToBuy, buyAmount, market.slug);
       if (success) {
         createNotification(
           userId,
-          'Agent Trade ®ﬂ‰÷®ﬂ”»',
-          `Your agent bought $1.00 of ${sideToBuy} on "${pmMarket.question || market.slug}" Ú¿‘ consensus backs ${sideToBuy} at ${(consensus * 100).toFixed(0)}T‚.`,
+          'Agent Trade ÷®',
+          `Your agent bought $1.00 of ${sideToBuy} on "${pmMarket.question || market.slug}"  consensus backs ${sideToBuy} at ${(consensus * 100).toFixed(0)}T.`,
           'trade'
         ).catch(console.error);
         return;
@@ -7600,7 +7624,7 @@ async function executeDCAStrategy(userId, agentWalletId, balance) {
     }
     createNotification(
       userId,
-      'DCA Invested ®ﬂ‰÷Úœ¶',
+      'DCA Invested œ¶',
       `Your agent invested a scheduled $1.00 in ${side} shares for "${question}".`,
       'trade'
     ).catch(console.error);
@@ -7654,7 +7678,7 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
           side,
           usdc_amount: amount,
           entry_price: 0.5,
-          question: `®ﬂ‰÷ Agent: ${question}`,
+          question: ` Agent: ${question}`,
           market_id: contractAddress,
           state: 'COMPLETE',
           tx_hash: txHash,
@@ -7677,18 +7701,18 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
   }
 }
 
-// Ú‘¿Ú‘¿ House AI Trader Agent ("Pulse") Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  House AI Trader Agent ("Pulse") 
 // A fully autonomous agent with its own Circle dev-controlled wallet and
 // ERC-8004 on-chain identity. Every cycle it researches live markets
 // (Polymarket consensus vs on-chain LMSR price), reasons about the best
-// opportunity, and executes a real USDC trade on Arc Ú¿‘ publishing its
+// opportunity, and executes a real USDC trade on Arc  publishing its
 // decision, reasoning and Arcscan receipt to a public feed.
 const HOUSE_AGENT = (process.env.HOUSE_AGENT || 'true') === 'true';
 const HOUSE_AGENT_USER = 'house_pulse';
 const HOUSE_AGENT_KEY = `agent_${HOUSE_AGENT_USER}`;
 // Seed / liquidity wallets: raw 0x EOAs created by seed scripts to bootstrap
-// market liquidity Ú¿‘ NOT real people. The app only ever creates eth_<addr>
-// (MetaMask) or supabase_<uuid> (Google) ids, so a bare 0xÚ¿Ê id is always seed.
+// market liquidity  NOT real people. The app only ever creates eth_<addr>
+// (MetaMask) or supabase_<uuid> (Google) ids, so a bare 0x id is always seed.
 // Excluded from the "humans" bucket so /versus + /stats don't pass off seeded
 // liquidity as human traders.
 const isSeedWallet = (uid) => typeof uid === 'string' && /^0x[0-9a-fA-F]{40}$/.test(uid);
@@ -7697,9 +7721,9 @@ const HOUSE_AGENT_MAX_TRADE = 0.5; // USDC per decision
 let houseAgentFundedThisRun = false;
 let houseAgentBusy = false;
 
-// Ú‘¿Ú‘¿ Sage: a SECOND autonomous agent that is a creator, not a trader Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Sage: a SECOND autonomous agent that is a creator, not a trader 
 // Sage publishes premium Signals (on-chain attested via SignalRegistry) and
-// gets PAID by other agents who buy them. This makes PulseÚ∆“Sage a true
+// gets PAID by other agents who buy them. This makes PulseSage a true
 // agent-to-agent value transfer on Arc: one AI pays another AI for
 // alpha, settled in USDC, with on-chain provenance for the content.
 const SIGNAL_REGISTRY_ADDRESS = (process.env.SIGNAL_REGISTRY_ADDRESS || '').trim();
@@ -7742,8 +7766,8 @@ async function ensureHouseAgentWallet() {
   // Public profile row (notifications/trades FK to profiles.user_id).
   await supabase.from('profiles').upsert({
     user_id: HOUSE_AGENT_USER,
-    display_name: 'Pulse ®ﬂ‰÷',
-    bio: 'Autonomous house AI trader. Researches every market, reasons about mispricings, and settles trades in USDC on Arc Ú¿‘ no human in the loop.',
+    display_name: 'Pulse ',
+    bio: 'Autonomous house AI trader. Researches every market, reasons about mispricings, and settles trades in USDC on Arc  no human in the loop.',
     avatar_url: 'https://api.dicebear.com/7.x/bottts/png?size=128&seed=pulse',
   }, { onConflict: 'user_id' });
 
@@ -7784,7 +7808,7 @@ async function ensureHouseAgentWallet() {
   // ERC-8004 on-chain identity (idempotent: an existing identity is NEVER re-minted).
   if (!registeredAgents.has(HOUSE_AGENT_KEY)) {
     let existing = await resolveAgentTokenId(HOUSE_AGENT_KEY, info.address);
-    if (!existing && await agentHasIdentity(info.address)) existing = true; // already owns one Ú¿‘ don't re-mint
+    if (!existing && await agentHasIdentity(info.address)) existing = true; // already owns one  don't re-mint
     if (existing) {
       registeredAgents.add(HOUSE_AGENT_KEY);
     } else if (balance >= 0.2) {
@@ -7822,7 +7846,7 @@ async function ensureSageAgent() {
       const existing = await getWalletId(SAGE_AGENT_KEY);
       if (existing) {
         const info = await getWalletInfo(existing);
-        // Skip the bootstrap funding Ú¿‘ the other call handled it
+        // Skip the bootstrap funding  the other call handled it
         sageEnsured = true;
         return { walletId: existing, address: info.address, balance: parseFloat(info.usdcBalance) || 0 };
       }
@@ -7866,7 +7890,7 @@ async function ensureSageAgent() {
     const bal = parseFloat((await getWalletInfo(walletId)).usdcBalance) || 0;
     await supabase.from('profiles').upsert({
       user_id: SAGE_AGENT_USER,
-      display_name: 'Sage ®ﬂ‘Ó',
+      display_name: 'Sage ',
       bio: 'Autonomous forecaster agent. Publishes premium Signals attested on-chain; earns USDC when other agents buy its alpha.',
       avatar_url: 'https://api.dicebear.com/7.x/bottts/png?size=128&seed=sage',
     }, { onConflict: 'user_id' });
@@ -7874,7 +7898,7 @@ async function ensureSageAgent() {
     // 2) ERC-8004 identity (best-effort; needs a little USDC for gas-as-USDC).
     if (!registeredAgents.has(SAGE_AGENT_KEY)) {
       let existing = await resolveAgentTokenId(SAGE_AGENT_KEY, info.address);
-      if (!existing && await agentHasIdentity(info.address)) existing = true; // already owns one Ú¿‘ don't re-mint
+      if (!existing && await agentHasIdentity(info.address)) existing = true; // already owns one  don't re-mint
       if (existing) {
         registeredAgents.add(SAGE_AGENT_KEY);
       } else if ((parseFloat(info.usdcBalance) || 0) >= 0.2 || bal >= 0.2) {
@@ -7918,7 +7942,7 @@ async function ensureSageAgent() {
           teaser: 'ETF inflows + post-halving supply squeeze vs. macro drag, with on-chain order-flow diverging from the implied probability. Unlock to see the side + the full thesis.',
           thesis:
             'Spot ETF net inflows and the post-halving supply squeeze outweigh near-term macro drag. '
-            + 'On-chain order-flow on Puls skews YES while the implied probability still lags fundamentals Ú¿‘ '
+            + 'On-chain order-flow on Puls skews YES while the implied probability still lags fundamentals  '
             + 'a convergence trade as pricing catches up. Invalidation: a sustained risk-off macro shock or an ETF outflow streak.',
           price_usdc: 0.001,
           status: 'published',
@@ -7966,10 +7990,10 @@ async function ensureSageAgent() {
   }
 }
 
-// Pay a creator for alpha (agentÚ∆“creator nanopayment) BEFORE deciding.
+// Pay a creator for alpha (agentcreator nanopayment) BEFORE deciding.
 // This is the heart of our Agentic narrative: the autonomous agent spends real
-// USDC to buy a forecaster's signal, then reasons over it Ú¿‘ value too small to
-// move before now moves agentÚ∆“creator on Arc. Uses the agent's own Circle SCA
+// USDC to buy a forecaster's signal, then reasons over it  value too small to
+// move before now moves agentcreator on Arc. Uses the agent's own Circle SCA
 // wallet (gasless) to transfer the per-read fee to the creator (X402_SELLER_ADDRESS,
 // the same payTo behind the /api/alpha/sample x402 paywall). Best-effort: if it
 // can't pay (no creator address / transfer fails) the agent still trades, just
@@ -8052,7 +8076,7 @@ async function houseAgentPayForAlpha(agentWalletId, agentAddress) {
         });
     }
 
-    // Receipt Ú∆“ Earnings/x402 feed.
+    // Receipt  Earnings/x402 feed.
     supabase.from('x402_payments').insert({
       endpoint: counterparty === 'agent_sage' ? 'agent_to_agent' : 'agent_alpha',
       payer: agentAddress || null,
@@ -8063,7 +8087,7 @@ async function houseAgentPayForAlpha(agentWalletId, agentAddress) {
       raw: { kind: counterparty === 'agent_sage' ? 'agent_to_agent' : 'agent_alpha', agent: HOUSE_AGENT_USER, counterparty, signalId, onchainTx, signal: { market: signal.market, edge_bps: signal.edge_bps } },
     }).then(({ error }) => { if (error) console.warn('[Pulse] alpha receipt insert failed:', error.message); });
 
-    console.log(`[Pulse] bought alpha from ${counterparty} Ú¿‘ ${price} USDC Ú∆“ ${creator} (tx ${txId})`);
+    console.log(`[Pulse] bought alpha from ${counterparty}  ${price} USDC  ${creator} (tx ${txId})`);
     return { cost: price, creator, txId, signal, counterparty, signalId, onchainTx };
   } catch (e) {
     console.error('[Pulse] pay-for-alpha failed (continuing without it):', e.message);
@@ -8095,17 +8119,17 @@ async function houseAgentResearch() {
     let pmYes;
     try { pmYes = parseFloat(JSON.parse(pm.outcomePrices || '[]')[0]); } catch { continue; }
     if (Number.isNaN(pmYes)) continue;
-    // Skip near-decided markets (Ú…»0T‚ / Ú…»100T‚): backing the favorite there has no
-    // upside, yet conviction=|p-0.5|*2 ranked them HIGHEST Ú¿‘ so every agent piled
-    // into the same one (e.g. a 0T‚ line). Only trade markets with a live question.
+    // Skip near-decided markets (0T / 100T): backing the favorite there has no
+    // upside, yet conviction=|p-0.5|*2 ranked them HIGHEST  so every agent piled
+    // into the same one (e.g. a 0T line). Only trade markets with a live question.
     if (pmYes <= 0.06 || pmYes >= 0.94) continue;
-    // Puls quotes the Polymarket consensus 1:1 (see displayPrices) Ú¿‘ we do NOT
+    // Puls quotes the Polymarket consensus 1:1 (see displayPrices)  we do NOT
     // trade an on-chain-vs-consensus "arb", which would be a testnet artifact and
     // makes agents distrust Arc. Instead each agent backs the side that live web
     // research + the consensus support. "Conviction" = how far consensus leans
     // from a coin-flip; the agent's web brief decides whether to ride it.
     const side = pmYes >= 0.5 ? 'YES' : 'NO';
-    const conviction = Math.abs(pmYes - 0.5) * 2; // 0 (toss-up) Ú¿Ê 1 (near-certain)
+    const conviction = Math.abs(pmYes - 0.5) * 2; // 0 (toss-up)  1 (near-certain)
     candidates.push({
       slug: m.slug,
       question: pm.question || m.slug.replace(/-/g, ' '),
@@ -8133,11 +8157,11 @@ async function houseAgentResearch() {
 // Decide: LLM picks among the top candidates and explains itself; if the LLM
 // is unavailable the agent falls back to deterministic value reasoning.
 
-// Ú‘¿Ú‘¿ Risk & budget manager (autonomy) Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Risk & budget manager (autonomy) 
 // Pulse sizes each trade from its bankroll, current win-streak, and a daily
-// spend cap Ú¿‘ and refuses to act when edge is thin or the day's budget is spent.
+// spend cap  and refuses to act when edge is thin or the day's budget is spent.
 // This makes the agent *decide whether to act*, not just act.
-const HOUSE_AGENT_MIN_EDGE = parseFloat(process.env.HOUSE_AGENT_MIN_EDGE || '0.04'); // 4T‚ edge bar
+const HOUSE_AGENT_MIN_EDGE = parseFloat(process.env.HOUSE_AGENT_MIN_EDGE || '0.04'); // 4T edge bar
 const HOUSE_AGENT_DAILY_CAP = parseFloat(process.env.HOUSE_AGENT_DAILY_CAP || '5'); // USDC/day
 const houseRisk = { streak: 0, lastOutcomeAt: 0, spentToday: 0, dayKey: '' };
 
@@ -8163,14 +8187,14 @@ async function houseAgentDecide(candidates, balance, alpha = null, research = nu
   const evaluated = candidates.length;
   const bestEdge = top.length ? top[0].edge : 0;
 
-  // Risk-managed stake. 0 Ú∆“ can't size (low bankroll or daily cap hit).
+  // Risk-managed stake. 0  can't size (low bankroll or daily cap hit).
   const amount = houseRiskSize(balance);
 
-  // The agent DECIDES WHETHER TO ACT Ú¿‘ visible skip with a reason.
+  // The agent DECIDES WHETHER TO ACT  visible skip with a reason.
   if (top.length === 0 || bestEdge < HOUSE_AGENT_MIN_EDGE) {
     return {
       action: 'skip', evaluated, bestEdge, brain: 'risk', sources,
-      reasoning: `Scanned ${evaluated} markets; best edge ${(bestEdge * 100).toFixed(1)}T‚ is below my ${(HOUSE_AGENT_MIN_EDGE * 100).toFixed(0)}T‚ bar. No +EV trade Ú¿‘ holding capital this cycle.`,
+      reasoning: `Scanned ${evaluated} markets; best edge ${(bestEdge * 100).toFixed(1)}T is below my ${(HOUSE_AGENT_MIN_EDGE * 100).toFixed(0)}T bar. No +EV trade  holding capital this cycle.`,
     };
   }
   if (amount < 0.1) {
@@ -8178,15 +8202,15 @@ async function houseAgentDecide(candidates, balance, alpha = null, research = nu
     return {
       action: 'skip', evaluated, bestEdge, brain: 'risk', sources,
       reasoning: dailyHit
-        ? `Found a ${(bestEdge * 100).toFixed(1)}T‚ edge but I've hit my $${HOUSE_AGENT_DAILY_CAP}/day risk cap Ú¿‘ standing down until tomorrow.`
-        : `Edge looks good but bankroll is too low to size a safe stake Ú¿‘ preserving capital.`,
+        ? `Found a ${(bestEdge * 100).toFixed(1)}T edge but I've hit my $${HOUSE_AGENT_DAILY_CAP}/day risk cap  standing down until tomorrow.`
+        : `Edge looks good but bankroll is too low to size a safe stake  preserving capital.`,
     };
   }
 
   try {
-    const sys = `You are Pulse, an autonomous value trader on the Puls prediction market (Arc Testnet). Puls prices mirror the Polymarket consensus 1:1 Ú¿‘ you do NOT trade venue price gaps. You receive candidates with the consensus probability and a conviction score, and decide whether live research + the consensus justify backing a side.${alpha ? ' You just PAID a forecaster ' + alpha.cost + ' USDC for a premium alpha signal (below) Ú¿‘ weigh it.' : ''}${research && research.brief ? ' You also researched the open web (live news/sentiment below) Ú¿‘ use it to ground the call.' : ''} Pick the single best trade. Respond with STRICT JSON only: {"slug": "...", "side": "YES"|"NO", "reasoning": "<2-3 sentences, cite the consensus probability and the web finding; never compare on-chain vs Polymarket prices>"}`;
+    const sys = `You are Pulse, an autonomous value trader on the Puls prediction market (Arc Testnet). Puls prices mirror the Polymarket consensus 1:1  you do NOT trade venue price gaps. You receive candidates with the consensus probability and a conviction score, and decide whether live research + the consensus justify backing a side.${alpha ? ' You just PAID a forecaster ' + alpha.cost + ' USDC for a premium alpha signal (below)  weigh it.' : ''}${research && research.brief ? ' You also researched the open web (live news/sentiment below)  use it to ground the call.' : ''} Pick the single best trade. Respond with STRICT JSON only: {"slug": "...", "side": "YES"|"NO", "reasoning": "<2-3 sentences, cite the consensus probability and the web finding; never compare on-chain vs Polymarket prices>"}`;
     const candidateText = top.map((c, i) =>
-      `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus YES: ${(c.pmYes * 100).toFixed(0)}T‚ | conviction ${((c.conviction ?? c.edge) * 100).toFixed(0)}% (leans ${c.side})`
+      `${i + 1}. ${c.question}\n   slug: ${c.slug} | consensus YES: ${(c.pmYes * 100).toFixed(0)}T | conviction ${((c.conviction ?? c.edge) * 100).toFixed(0)}% (leans ${c.side})`
     ).join('\n');
     const alphaText = alpha
       ? `\n\nPaid alpha signal (you spent ${alpha.cost} USDC on this):\n${JSON.stringify(alpha.signal, null, 2)}`
@@ -8211,7 +8235,7 @@ async function houseAgentDecide(candidates, balance, alpha = null, research = nu
       amount,
       evaluated,
       streak: houseRisk.streak,
-      reasoning: `Consensus puts ${c.side} at ${(consensus * 100).toFixed(0)}T‚ with ${((c.conviction ?? c.edge) * 100).toFixed(0)}% conviction. Sizing ${(c.amount ?? 0)} at ${houseRisk.streak >= 2 ? 'elevated (win-streak)' : 'base'} risk; backing ${c.side}.`,
+      reasoning: `Consensus puts ${c.side} at ${(consensus * 100).toFixed(0)}T with ${((c.conviction ?? c.edge) * 100).toFixed(0)}% conviction. Sizing ${(c.amount ?? 0)} at ${houseRisk.streak >= 2 ? 'elevated (win-streak)' : 'base'} risk; backing ${c.side}.`,
       brain: 'quant',
       sources,
     };
@@ -8242,9 +8266,9 @@ async function houseAgentTick() {
       return;
     }
 
-    // Pay a creator for alpha BEFORE deciding (agentÚ∆“creator nanopayment on Arc).
+    // Pay a creator for alpha BEFORE deciding (agentcreator nanopayment on Arc).
     // The purchased signal becomes extra context for the LLM, and its cost is
-    // netted out of the decision economics. Best-effort Ú¿‘ never blocks trading.
+    // netted out of the decision economics. Best-effort  never blocks trading.
     const alpha = await houseAgentPayForAlpha(agent.walletId, agent.address);
 
     const candidates = await houseAgentResearch();
@@ -8254,13 +8278,13 @@ async function houseAgentTick() {
     }
 
     // Research the open web on the top candidate's question (keyless Jina+DDG).
-    // This gives the agent real-world context (news/sentiment) to reason over Ú¿‘
+    // This gives the agent real-world context (news/sentiment) to reason over 
     // not just the on-chain price gap. Best-effort: never blocks the decision.
     let research = { brief: '', sources: [] };
     try {
       research = await researchQuestion(candidates[0].question, 4);
       if (research.sources.length) {
-        console.log(`[Pulse] researched "${candidates[0].question}" Ú∆“ ${research.sources.length} sources (${research.sources.map(s => s.source).join(', ')})`);
+        console.log(`[Pulse] researched "${candidates[0].question}"  ${research.sources.length} sources (${research.sources.map(s => s.source).join(', ')})`);
       }
     } catch (e) {
       console.warn('[Pulse] research failed (continuing):', e.message);
@@ -8272,10 +8296,10 @@ async function houseAgentTick() {
       return;
     }
 
-    // Ú‘¿Ú‘¿ The agent decided NOT to act Ú¿‘ publish the skip as a visible decision.
+    //  The agent decided NOT to act  publish the skip as a visible decision.
     // (Full autonomy = deciding whether to act, not just acting.)
     if (decision.action === 'skip') {
-      console.log(`[Pulse] SKIP Ú¿‘ ${decision.reasoning}`);
+      console.log(`[Pulse] SKIP  ${decision.reasoning}`);
       await supabase.from('notifications').insert({
         user_id: HOUSE_AGENT_USER,
         title: 'No +EV trade',
@@ -8283,7 +8307,7 @@ async function houseAgentTick() {
         read: true,
         message: JSON.stringify({
           action: 'skip',
-          question: `Evaluated ${decision.evaluated} markets Ú¿‘ no trade`,
+          question: `Evaluated ${decision.evaluated} markets  no trade`,
           reasoning: decision.reasoning,
           brain: decision.brain,
           evaluated: decision.evaluated,
@@ -8332,7 +8356,7 @@ async function houseAgentTick() {
         txHash: result.txHash,
         contractAddress: decision.contractAddress,
         slug: decision.slug || null,
-        // AgentÚ∆“creator nanopayment that fed this decision (if any).
+        // Agentcreator nanopayment that fed this decision (if any).
         alphaPaid: alpha ? alpha.cost : null,
         alphaCreator: alpha ? alpha.creator : null,
         alphaTxId: alpha ? alpha.txId : null,
@@ -8392,7 +8416,7 @@ app.get('/api/agents/house', async (req, res) => {
       catch { return null; }
     }).filter(Boolean);
 
-    // Sage Ú¿‘ the creator-agent Pulse buys signals from (agent-to-agent).
+    // Sage  the creator-agent Pulse buys signals from (agent-to-agent).
     let sage = null;
     try {
       const sageWalletId = await getWalletId(SAGE_AGENT_KEY);
@@ -8430,7 +8454,7 @@ app.get('/api/agents/house', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Economy Explorer Ú¿‘ live on-chain USDC feed (Blockscout / Arcscan v2 API).
+// Economy Explorer  live on-chain USDC feed (Blockscout / Arcscan v2 API).
 // Aggregates USDC token-transfers for Puls-owned addresses (treasury + house
 // agent) into a verifiable activity feed with proof links. No secrets needed:
 // testnet.arcscan.app is a public Blockscout instance. If ARC_EXPLORER_API is
@@ -8489,7 +8513,7 @@ app.get('/api/economy/feed', generalLimiter, async (req, res) => {
     if (treasury) tracked[treasury.toLowerCase()] = { label: 'Treasury', role: 'treasury', address: treasury };
     const houseAgent = await getHouseAgentAddress();
     if (houseAgent) tracked[houseAgent.toLowerCase()] = { label: 'Pulse (house agent)', role: 'agent', address: houseAgent };
-    // x402 creator/seller Ú¿‘ batched nanopayments settle here on-chain. Surfacing
+    // x402 creator/seller  batched nanopayments settle here on-chain. Surfacing
     // the seller means every Circle Gateway batch flush shows up with a real,
     // openable Arcscan tx (the on-chain proof behind the instant receipts).
     const x402Seller = (process.env.X402_SELLER_ADDRESS || '').trim();
@@ -8520,10 +8544,10 @@ app.get('/api/economy/feed', generalLimiter, async (req, res) => {
     usdcItems.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
     const labelFor = (addr) => {
-      if (!addr) return { label: 'Ú¿‘', address: null };
+      if (!addr) return { label: '', address: null };
       const low = addr.toLowerCase();
       if (tracked[low]) return { label: tracked[low].label, address: addr };
-      return { label: `${addr.slice(0, 6)}Ú¿Ê${addr.slice(-4)}`, address: addr };
+      return { label: `${addr.slice(0, 6)}${addr.slice(-4)}`, address: addr };
     };
 
     const feed = usdcItems.slice(0, limit).map((it) => {
@@ -8604,11 +8628,11 @@ if (HOUSE_AGENT) {
   });
 }
 
-// Ú‘¿Ú‘¿ Agent Swarm: a colony of autonomous AI actors that live in Pulsmarket Ú‘¿Ú‘¿Ú‘¿Ú‘¿Ú‘¿
+//  Agent Swarm: a colony of autonomous AI actors that live in Pulsmarket 
 // Multiple persona-driven agents (traders + creators), each with its own wallet,
 // ERC-8004 identity and preferred LLM "brain". They research, publish + evaluate
 // + buy each other's signals (commenting "accurate, buying" / "flawed, skipping"),
-// trade predictions like humans, and comment on markets Ú¿‘ powering AI vs Humans.
+// trade predictions like humans, and comment on markets  powering AI vs Humans.
 // Env-gated (AGENT_SWARM=true); reuses the house-agent plumbing, never touches it.
 const swarm = registerSwarm(app, {
   authenticateUser, requireVerifiedUser, strictLimiter,
@@ -8625,7 +8649,7 @@ const swarm = registerSwarm(app, {
 });
 // Delayed 90s so the HTTP server is fully operational before agents start
 // trading + deploying markets on-chain (each trade = viem writeContract that
-// blocks the event loop for 5-10s Ú∆“ 503 + CORS errors on 512MB dyno).
+// blocks the event loop for 5-10s  503 + CORS errors on 512MB dyno).
 if (typeof swarm.start === 'function') {
   setTimeout(() => swarm.start(), 90 * 1000);
 }
