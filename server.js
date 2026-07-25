@@ -431,7 +431,7 @@ const realSupabase = createClient(
   process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : ''
 );
 
-const NEON_DATABASE_URL = process.env.DATABASE_URL || '';
+const NEON_DATABASE_URL = (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL || '').trim();
 
 const supabase = createNeonClient(NEON_DATABASE_URL, realSupabase);
 
