@@ -445,10 +445,12 @@
           var when = flowProofUrl
             ? '<a class="when" href="' + safeUrl(flowProofUrl) + '" target="_blank" rel="noopener" title="View onchain settlement on Arcscan">' + rel(p.createdAt) + ' ↗</a>'
             : '<span class="when">' + rel(p.createdAt) + '</span>';
+          var fromName = p.from || p.payerShort || short(p.payer);
+          var toName = p.to || p.payeeShort || short(p.pay_to || p.payTo);
           return '<div class="frow">' +
             '<span class="memo ' + m.cls + '">' + esc(m.label) + '</span>' +
             '<span class="amt">' + fmtAmt(p.amountUsdc) + '</span>' +
-            '<span class="flowdir">' + esc(p.payerShort || short(p.payer)) + ' → ' + esc(short(p.payTo)) + '</span>' +
+            '<span class="flowdir">' + esc(fromName) + ' → ' + esc(toName) + '</span>' +
             '<span class="memocode" title="Onchain Arc memo (decoded — explorers show this as raw hex)">🏷 ' + memoHTML + '</span>' +
             when + '</div>';
         }).join('');
@@ -475,8 +477,16 @@
 
     // ── Skin in the game: AgentBond stakes (posted / slashed / returned) ────
     function agentName(a) {
-      a = String(a || '').replace(/^agent_swarm_/, '').replace(/^agent_/, '');
-      return a ? a.charAt(0).toUpperCase() + a.slice(1) : 'Agent';
+      var name = String(a || '').replace(/^agent_swarm_/, '').replace(/^agent_/, '');
+      if (name.includes('231e1ae9') || name.includes('striker')) return 'Striker ⚽';
+      if (name.includes('atlas')) return 'Atlas 📈';
+      if (name.includes('nova')) return 'Nova 🌐';
+      if (name.includes('vega')) return 'Vega ⚡';
+      if (name.includes('cygnus')) return 'Cygnus 🛡️';
+      if (name.includes('orion')) return 'Orion 🔭';
+      if (name.includes('sage')) return 'Sage 🔮';
+      if (name.includes('pulse')) return 'Pulse ⚡';
+      return name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Agent';
     }
     function loadBonds() {
       fetch(API + '/api/agents/bonds', { cache: 'no-store' })
@@ -500,8 +510,9 @@
             var label = st === 'slashed' ? '⚔ slashed' : st === 'returned' ? '✓ returned' : '● active';
             var side = String(b.stance || '').toUpperCase();
             var sideCls = side === 'YES' ? 'yes' : side === 'NO' ? 'no' : '';
+            var agName = b.agent || b.agentName || agentName(b.agentUserId || b.agent);
             return '<div class="frow">' +
-              '<span class="memo a2a">' + esc(agentName(b.agent)) + '</span>' +
+              '<span class="memo a2a">' + esc(agName) + '</span>' +
               (side ? '<span class="pill ' + sideCls + '" style="font-size:10.5px">' + side + '</span>' : '') +
               '<span class="amt">' + fmtAmt(b.amountUsdc) + '</span>' +
               '<span class="flowdir">' + esc(b.market || b.title || '') + '</span>' +
@@ -525,8 +536,8 @@
           if (!rows.length) { el.innerHTML = '<div class="err">No recent x402 payments.</div>'; return; }
           el.innerHTML = rows.map(function(p) {
             var amt = '$' + (parseFloat(p.amountUsdc || p.amount_usdc || 0)).toFixed(4);
-            var from = esc(p.fromUserId || p.from || 'agent');
-            var to = esc(p.toUserId || p.to || 'creator');
+            var from = esc(p.from || p.payerShort || p.fromUserId || 'Agent');
+            var to = esc(p.to || p.payeeShort || p.toUserId || 'Creator');
             var memo = esc(p.memo || p.reason || p.resource || 'nanopayment');
             var tx = p.txHash || p.tx || '';
             var link = tx ? '<a class="when" href="https://testnet.arcscan.app/tx/' + esc(tx) + '" target="_blank">Arcscan ↗</a>' : '';
