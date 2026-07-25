@@ -3519,21 +3519,43 @@ app.get('/api/x402/payments', async (req, res) => {
       const raw = (typeof r.raw === 'string') ? JSON.parse(r.raw || '{}') : (r.raw || {});
       const fromVal = raw.agent || r.payer || '';
       const toVal = raw.counterparty || raw.seller || r.pay_to || '';
+      const fromName = resolveName(fromVal);
+      const toName = resolveName(toVal);
+      const amtUsdc = Number(r.amount_usdc || 0);
+      const txHash = (r.gateway_tx && String(r.gateway_tx).startsWith('0x')) ? r.gateway_tx : null;
+
       return {
         id: r.id,
         endpoint: r.endpoint,
         type: r.endpoint,
-        from: resolveName(fromVal),
-        to: resolveName(toVal),
+        // Resolved display names with icons
+        from: fromName,
+        to: toName,
+        fromLabel: fromName,
+        toLabel: toName,
+        payerShort: fromName,
+        payeeShort: toName,
+        fromShort: fromName,
+        toShort: toName,
+
+        // Raw addresses
+        payer: r.payer || fromVal || null,
+        pay_to: r.pay_to || toVal || null,
         fromAddress: r.payer || null,
         toAddress: r.pay_to || null,
-        amountUsdc: Number(r.amount_usdc || 0),
+
+        // Amounts (camelCase + snake_case + numeric)
+        amountUsdc: amtUsdc,
+        amount_usdc: amtUsdc,
+        amount: amtUsdc,
+
         memo: raw.kind || raw.onchainMemo || r.endpoint,
-        txHash: (r.gateway_tx && String(r.gateway_tx).startsWith('0x')) ? r.gateway_tx : null,
-        arcscanUrl: (r.gateway_tx && String(r.gateway_tx).startsWith('0x')) ? `https://testnet.arcscan.app/tx/${r.gateway_tx}` : null,
+        txHash: txHash,
+        arcscanUrl: txHash ? `https://testnet.arcscan.app/tx/${txHash}` : null,
         receiptId: r.gateway_tx || null,
         status: r.gateway_tx ? 'settled' : 'recorded',
         createdAt: r.created_at,
+        created_at: r.created_at,
       };
     });
 
