@@ -5202,27 +5202,25 @@ app.get('/api/profile/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     if (!userId) return res.status(400).json({ error: 'userId required' });
+
+    const isAgentUser = userId.startsWith('agent_');
+    const ownerUserId = isAgentUser ? userId.replace('agent_', '') : userId;
+    const agentUserId = isAgentUser ? userId : `agent_${userId}`;
     
     let profile = null;
-    const { data: profData, error: profErr } = await supabase
+    const { data: profData } = await supabase
       .from('profiles')
       .select('*')
-      .eq('user_id', userId)
-      .single();
+      .in('user_id', [userId, ownerUserId])
+      .limit(1);
       
-    if (profErr) {
-      if (profErr.code === '42P01' || profErr.message?.includes('does not exist')) {
-        console.warn(`Profiles table does not exist. Returning default profile for ${userId}`);
-      } else if (profErr.code !== 'PGRST116') {
-        console.error(`Profile fetch error for user ${userId}:`, profErr.message);
-      }
-    } else {
-      profile = profData;
+    if (profData && profData.length > 0) {
+      profile = profData[0];
     }
     
-    if (!profile) {
-      // Return a default profile if it doesn't exist yet but has trades
-      let name = 'Puls Trader';
+    if (!profile || isAgentUser) {
+      let name = isAgentUser ? 'AI Trading Agent' : 'Puls Trader';
+      if (profile && isAgentUser) name = `${profile.display_name}'s AI Agent`;
       let avatar = `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${userId}`;
       if (userId.startsWith('eth_')) {
         const addr = userId.replace('eth_', '');
@@ -5233,38 +5231,32 @@ app.get('/api/profile/:userId', async (req, res) => {
         user_id: userId,
         display_name: name,
         avatar_url: avatar,
-        bio: 'Active trader on PulsMarket.'
+        bio: isAgentUser ? 'Automated AI trading agent on PulsMarket.' : 'Active trader on PulsMarket.'
       };
     }
     
-    // Stats come from the in-memory leaderboard (legacy Supabase table is unusable)
-    const stats = leaderboardStats.get(userId) || null;
+    const stats = leaderboardStats.get(userId) || leaderboardStats.get(ownerUserId) || null;
     
     let trades = [];
-    const { data: tradesData, error: tradesErr } = await supabase
+    const { data: tradesData } = await supabase
       .from('trades')
       .select('*')
-      .eq('user_id', userId)
+      .in('user_id', [userId, ownerUserId, agentUserId])
       .eq('state', 'COMPLETE')
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(100);
       
-    if (tradesErr) {
-      if (tradesErr.code === '42P01' || tradesErr.message?.includes('does not exist')) {
-        console.warn(`Trades table does not exist. Using empty trades list for ${userId}`);
-      }
-    } else {
-      trades = tradesData ?? [];
-    }
+    trades = tradesData ?? [];
+    const calcVolume = trades.reduce((sum, t) => sum + Math.abs(parseFloat(t.usdc_amount || 0)), 0);
       
     res.json({
       profile,
       stats: stats ? {
-        volume: parseFloat(stats.volume),
-        pnl: parseFloat(stats.pnl),
-        tradesCount: stats.trades_count,
-        winRate: parseFloat(stats.win_rate)
-      } : { volume: 0, pnl: 0, tradesCount: 0, winRate: 0 },
+        volume: parseFloat(stats.volume || 0),
+        pnl: parseFloat(stats.pnl || 0),
+        tradesCount: stats.trades_count || trades.length,
+        winRate: parseFloat(stats.win_rate || 0)
+      } : { volume: Math.round(calcVolume * 100) / 100, pnl: 0, tradesCount: trades.length, winRate: 0 },
       trades
     });
   } catch (e) {
