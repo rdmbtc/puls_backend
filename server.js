@@ -12,6 +12,7 @@ import cors from 'cors';
 import compression from 'compression';
 import { rateLimit } from 'express-rate-limit';
 import { createClient } from '@supabase/supabase-js';
+import { createNeonClient } from './lib/neon_supabase_adapter.js';
 import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
 import { createPublicClient, createWalletClient, http, decodeEventLog, keccak256, toHex, parseAbiItem, encodeFunctionData, stringToHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -425,10 +426,14 @@ const circle = initiateDeveloperControlledWalletsClient({
   entitySecret: process.env.CIRCLE_ENTITY_SECRET ? process.env.CIRCLE_ENTITY_SECRET.trim() : undefined,
 });
 
-const supabase = createClient(
+const realSupabase = createClient(
   process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
-  process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : '' // use service_role key (server-side only)
+  process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : ''
 );
+
+const NEON_DATABASE_URL = process.env.DATABASE_URL || '';
+
+const supabase = createNeonClient(NEON_DATABASE_URL, realSupabase);
 
 async function pingIndexNow(urls) {
   if (!urls || urls.length === 0) return;
