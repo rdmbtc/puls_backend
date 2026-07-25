@@ -3478,19 +3478,53 @@ app.get('/api/x402/payments', async (req, res) => {
       console.warn('[x402/payments] supabase read failed:', e.message);
     }
 
-    // Agent name lookup
-    const agentNames = { agent_swarm_vega: 'Vega ', agent_swarm_cygnus: 'Cygnus ', agent_swarm_orion: 'Orion ', agent_swarm_atlas: 'Atlas ', agent_swarm_nova: 'Nova ', agent_swarm_striker: 'Striker -', agent_sage: 'Sage ', house_pulse: 'Pulse ' };
-    const nameFor = (id) => agentNames[id] || (id || '').replace('agent_swarm_','').replace('agent_','');
+    // Agent name and address lookup
+    const AGENT_NAME_MAP = {
+      agent_swarm_vega: 'Vega ⚡',
+      agent_swarm_cygnus: 'Cygnus 🛡️',
+      agent_swarm_orion: 'Orion 🔭',
+      agent_swarm_atlas: 'Atlas 📈',
+      agent_swarm_nova: 'Nova 🌐',
+      agent_swarm_striker: 'Striker ⚽',
+      'agent_supabase_231e1ae9-9f9f-47bb-a6f7-2e406ba29b10': 'Striker ⚽',
+      agent_sage: 'Sage 🔮',
+      house_pulse: 'Pulse ⚡',
+      agent_house_agent: 'Pulse ⚡',
+      '0x6fd898b2e74182554ae32c5919d912f027a092f5': 'Striker ⚽',
+      '0x7b74a5884eb5b95240a0975c4b1eaf63d850374c': 'Atlas 📈',
+      '0xb526c00d8233568c58ced412073709030e930021': 'Nova 🌐',
+      '0xc5b26d99100f1e9dbbb95d66a10fef3034546540': 'Vega ⚡',
+      '0x6620ac5ec6eaff39d12db08298ba7f8cbbcf8641': 'Cygnus 🛡️',
+      '0x18da1c60f8d37f94be7a740bf5bfd4b61c275fac': 'Orion 🔭',
+    };
 
-    const short = (a) => (a && a.length > 12 ? `${a.slice(0, 6)}${a.slice(-4)}` : (a || ''));
+    const resolveName = (idOrAddr) => {
+      if (!idOrAddr) return 'Puls Agent 🤖';
+      const key = String(idOrAddr).toLowerCase();
+      if (AGENT_NAME_MAP[idOrAddr]) return AGENT_NAME_MAP[idOrAddr];
+      if (AGENT_NAME_MAP[key]) return AGENT_NAME_MAP[key];
+      if (key.includes('striker')) return 'Striker ⚽';
+      if (key.includes('atlas')) return 'Atlas 📈';
+      if (key.includes('nova')) return 'Nova 🌐';
+      if (key.includes('vega')) return 'Vega ⚡';
+      if (key.includes('cygnus')) return 'Cygnus 🛡️';
+      if (key.includes('orion')) return 'Orion 🔭';
+      if (key.includes('sage')) return 'Sage 🔮';
+      if (key.includes('pulse') || key.includes('house')) return 'Pulse ⚡';
+      if (key.startsWith('0x') && key.length > 10) return `${idOrAddr.slice(0, 6)}...${idOrAddr.slice(-4)}`;
+      return (idOrAddr || '').replace('agent_swarm_','').replace('agent_','');
+    };
+
     const payments = rows.map((r) => {
       const raw = (typeof r.raw === 'string') ? JSON.parse(r.raw || '{}') : (r.raw || {});
+      const fromVal = raw.agent || r.payer || '';
+      const toVal = raw.counterparty || raw.seller || r.pay_to || '';
       return {
         id: r.id,
         endpoint: r.endpoint,
         type: r.endpoint,
-        from: nameFor(raw.agent || r.payer || ''),
-        to: nameFor(raw.counterparty || raw.seller || r.pay_to || ''),
+        from: resolveName(fromVal),
+        to: resolveName(toVal),
         fromAddress: r.payer || null,
         toAddress: r.pay_to || null,
         amountUsdc: Number(r.amount_usdc || 0),
@@ -8507,6 +8541,19 @@ app.get('/api/economy/feed', generalLimiter, async (req, res) => {
     const x402Seller = (process.env.X402_SELLER_ADDRESS || '').trim();
     if (x402Seller) tracked[x402Seller.toLowerCase()] = { label: 'Alpha creator (x402)', role: 'creator', address: x402Seller };
 
+    // Swarm agents tracking
+    const swarmAgents = {
+      '0x6fd898b2e74182554ae32c5919d912f027a092f5': { label: 'Striker ⚽', role: 'agent' },
+      '0x7b74a5884eb5b95240a0975c4b1eaf63d850374c': { label: 'Atlas 📈', role: 'agent' },
+      '0xb526c00d8233568c58ced412073709030e930021': { label: 'Nova 🌐', role: 'agent' },
+      '0xc5b26d99100f1e9dbbb95d66a10fef3034546540': { label: 'Vega ⚡', role: 'agent' },
+      '0x6620ac5ec6eaff39d12db08298ba7f8cbbcf8641': { label: 'Cygnus 🛡️', role: 'agent' },
+      '0x18da1c60f8d37f94be7a740bf5bfd4b61c275fac': { label: 'Orion 🔭', role: 'agent' },
+    };
+    for (const [addr, info] of Object.entries(swarmAgents)) {
+      tracked[addr.toLowerCase()] = { label: info.label, role: info.role, address: addr };
+    }
+
     const all = [];
     for (const a of Object.keys(tracked)) {
       try {
@@ -8531,12 +8578,74 @@ app.get('/api/economy/feed', generalLimiter, async (req, res) => {
     }
     usdcItems.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-    const labelFor = (addr) => {
-      if (!addr) return { label: '', address: null };
-      const low = addr.toLowerCase();
-      if (tracked[low]) return { label: tracked[low].label, address: addr };
-      return { label: `${addr.slice(0, 6)}${addr.slice(-4)}`, address: addr };
-    };
+    // Fallback: If external explorer returns 0 items, read directly from x402_payments in Neon DB!
+    if (usdcItems.length === 0) {
+      try {
+        const { data: dbPayments } = await supabase
+          .from('x402_payments')
+          .select('id, endpoint, payer, pay_to, amount_usdc, gateway_tx, raw, created_at')
+          .order('created_at', { ascending: false })
+          .limit(limit);
+
+        if (dbPayments && dbPayments.length > 0) {
+          const AGENT_NAME_MAP = {
+            agent_swarm_vega: 'Vega ⚡', agent_swarm_cygnus: 'Cygnus 🛡️', agent_swarm_orion: 'Orion 🔭',
+            agent_swarm_atlas: 'Atlas 📈', agent_swarm_nova: 'Nova 🌐', agent_swarm_striker: 'Striker ⚽',
+            'agent_supabase_231e1ae9-9f9f-47bb-a6f7-2e406ba29b10': 'Striker ⚽', agent_sage: 'Sage 🔮',
+            house_pulse: 'Pulse ⚡', agent_house_agent: 'Pulse ⚡',
+            '0x6fd898b2e74182554ae32c5919d912f027a092f5': 'Striker ⚽',
+            '0x7b74a5884eb5b95240a0975c4b1eaf63d850374c': 'Atlas 📈',
+            '0xb526c00d8233568c58ced412073709030e930021': 'Nova 🌐',
+            '0xc5b26d99100f1e9dbbb95d66a10fef3034546540': 'Vega ⚡',
+            '0x6620ac5ec6eaff39d12db08298ba7f8cbbcf8641': 'Cygnus 🛡️',
+            '0x18da1c60f8d37f94be7a740bf5bfd4b61c275fac': 'Orion 🔭',
+          };
+          const resolveName = (val) => {
+            if (!val) return 'Puls Agent 🤖';
+            const k = String(val).toLowerCase();
+            if (AGENT_NAME_MAP[val]) return AGENT_NAME_MAP[val];
+            if (AGENT_NAME_MAP[k]) return AGENT_NAME_MAP[k];
+            if (k.includes('striker')) return 'Striker ⚽';
+            if (k.includes('atlas')) return 'Atlas 📈';
+            if (k.includes('nova')) return 'Nova 🌐';
+            if (k.includes('vega')) return 'Vega ⚡';
+            if (k.includes('cygnus')) return 'Cygnus 🛡️';
+            if (k.includes('orion')) return 'Orion 🔭';
+            if (k.includes('sage')) return 'Sage 🔮';
+            if (k.includes('pulse') || k.includes('house')) return 'Pulse ⚡';
+            if (k.startsWith('0x') && k.length > 10) return `${val.slice(0, 6)}...${val.slice(-4)}`;
+            return val;
+          };
+
+          const feed = dbPayments.map((r) => {
+            const raw = typeof r.raw === 'string' ? JSON.parse(r.raw || '{}') : (r.raw || {});
+            const fromName = resolveName(raw.agent || r.payer);
+            const toName = resolveName(raw.counterparty || raw.seller || r.pay_to);
+            const tx = (r.gateway_tx && String(r.gateway_tx).startsWith('0x')) ? r.gateway_tx : null;
+            return {
+              id: r.id,
+              txHash: tx,
+              arcscanUrl: tx ? `https://testnet.arcscan.app/tx/${tx}` : null,
+              from: r.payer,
+              fromLabel: fromName,
+              fromRole: 'agent',
+              to: r.pay_to,
+              toLabel: toName,
+              toRole: 'agent',
+              amountUsdc: Number(r.amount_usdc || 0),
+              action: r.endpoint === 'signal_unlock' ? 'Signal unlocked' : (r.endpoint === 'agent_to_agent' ? 'x402 agent transfer' : 'x402 nanopayment'),
+              timestamp: r.created_at,
+            };
+          });
+
+          const data = { feed, totalCount: feed.length, source: 'x402_payments' };
+          _economyFeedCache = { data, at: Date.now() };
+          return res.json(data);
+        }
+      } catch (e) {
+        console.warn('[economy] DB fallback failed:', e.message);
+      }
+    }
 
     const feed = usdcItems.slice(0, limit).map((it) => {
       const from = it.from?.hash || '';
