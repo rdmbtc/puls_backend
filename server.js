@@ -6277,11 +6277,25 @@ Output ONLY the JSON object.`;
             const _sigSide = String(r.signal.stance || '').toUpperCase() === 'NO' ? 'NO' : 'YES';
             let _sm = resolvePositionalMarket(_sigRef, '', feed) || await resolveMarketByName(_sigRef, feed);
             // If market not in feed/cache, try to deploy it on-demand from Polymarket
-            if (!_sm && typeof getOrDeployMarket === 'function') {
+            if (!_sm) {
               try {
-                const deployed = await getOrDeployMarket(_sigRef);
-                if (deployed) _sm = { slug: _sigRef, question: deployed.question || _sigRef, deployed: true };
-              } catch (_) {}
+                // Fetch market info from Polymarket to get deadline
+                const _pmRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(_sigRef)}`);
+                if (_pmRes.ok) {
+                  const _pmList = await _pmRes.json();
+                  if (Array.isArray(_pmList) && _pmList.length > 0) {
+                    const _pmMarket = _pmList[0];
+                    const _endDate = _pmMarket.endDate || _pmMarket.end_date_iso;
+                    const _deadline = _endDate ? Math.floor(new Date(_endDate).getTime() / 1000) : 0;
+                    if (_deadline > Math.floor(Date.now() / 1000) + 300) {
+                      const _addr = await getOrDeployMarket(_sigRef, _deadline);
+                      if (_addr) _sm = { slug: _sigRef, question: _pmMarket.question || _sigRef, deployed: true };
+                    }
+                  }
+                }
+              } catch (_deployErr) {
+                console.warn(`[agent/chat] on-demand deploy failed for ${_sigRef}:`, _deployErr.message);
+              }
             }
             if (_sm) {
               const _tr = await execAgentTrade(userId, agent, _sm, _sigSide, _stake);
