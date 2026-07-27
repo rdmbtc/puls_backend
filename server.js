@@ -172,7 +172,7 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-app.use(allowedOrigins.length ? cors({ origin: allowedOrigins }) : cors());
+app.use(allowedOrigins.length ? cors({ origin: allowedOrigins, credentials: true }) : cors());
 // Capture the raw request body so we can verify Circle's ECDSA webhook
 // signature over the exact bytes Circle signed (re-serializing the parsed JSON
 // would change key order/whitespace and break verification).
@@ -294,6 +294,12 @@ const authenticateUser = async (req, res, next) => {
 
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      // Ensure CORS headers are on 401 responses so browsers don't mask the real error
+      const origin = req.headers.origin;
+      if (origin && allowedOrigins.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+      }
       return res.status(401).json({ error: 'Unauthorized: Missing token' });
     }
     const token = authHeader.split(' ')[1];
