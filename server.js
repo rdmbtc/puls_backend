@@ -6276,6 +6276,13 @@ Output ONLY the JSON object.`;
           if (_stake > 0 && _sigRef && budgetLeft >= _stake - 1e-9) {
             const _sigSide = String(r.signal.stance || '').toUpperCase() === 'NO' ? 'NO' : 'YES';
             let _sm = resolvePositionalMarket(_sigRef, '', feed) || await resolveMarketByName(_sigRef, feed);
+            // If market not in feed/cache, try to deploy it on-demand from Polymarket
+            if (!_sm && typeof getOrDeployMarket === 'function') {
+              try {
+                const deployed = await getOrDeployMarket(_sigRef);
+                if (deployed) _sm = { slug: _sigRef, question: deployed.question || _sigRef, deployed: true };
+              } catch (_) {}
+            }
             if (_sm) {
               const _tr = await execAgentTrade(userId, agent, _sm, _sigSide, _stake);
               if (_tr.ok) { spentNow += _stake; budgetLeft -= _stake; trades.push(_tr.trade); notes.push(` acted on it  ${_sigSide} $${_stake} on "${_sm.question || _sm.slug}"`); }
