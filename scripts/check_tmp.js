@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-const apiKey = 'pk_live_9c22520ee370d6bd2ef50a4b9ffac51a3bdf9779c8690438';
+const apiKey = process.env.TEST_API_KEY || 'REPLACE_WITH_ENV_VAR';
 const hashedKey = crypto.createHash('sha256').update(apiKey).digest('hex');
 
 async function check() {
