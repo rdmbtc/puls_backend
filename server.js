@@ -6235,6 +6235,7 @@ Output ONLY the JSON object.`;
       if (m) intent = JSON.parse(m[0]);
       else intent.reply = raw;
     } catch (e) {
+      if (res.headersSent) return;
       return res.status(502).json({ error: `LLM error: ${e.message}` });
     }
 
@@ -6315,6 +6316,7 @@ Output ONLY the JSON object.`;
       sources: (research.sources || []).slice(0, 3),
     });
   } catch (e) {
+    if (res.headersSent) return;
     console.error('agent chat error:', e.message);
     res.status(500).json({ error: e.message });
   }
