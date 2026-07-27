@@ -19,3 +19,27 @@ pnl_data.json
 check_tmp.js
 scripts/check_tmp.js
 logs.txt
+
+# Migration/debug scripts with hardcoded Neon credentials — NEVER commit
+*_neon.js
+*_neon.mjs
+diagnose_*.js
+debug_*.js
+migrate_to_neon.js
+migrate_missing_*.js
+migrate_notifs_*.js
+init_neon.js
+nuke_*.js
+nuke_*.mjs
+seed_*_neon.js
+sync_columns_*.js
+fast_batch_migrate.js
+final_cleanup.js
+apply_all_migrations.js
+check_agent_trades_states.js
+patch_server_neon.py
+test_neon_*.js
+test_all_8_*.js
+test_endpoints.js
+test_rpc.js
+fix_*_neon.js
