@@ -1592,12 +1592,11 @@ const rpcProxyLimiter = rateLimit({
 });
 
 // POST /api/rpc-proxy
-  app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
+app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
     // 8s timeout for upstream RPC (Heroku 30s limit, leave headroom)
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
-    const { method, params, id, jsonrpc } = req.body;
     if (!method) {
       return res.status(400).json({ error: 'method required' });
     }
