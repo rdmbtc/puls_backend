@@ -1597,7 +1597,8 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
-    if (!method) {
+      const { method, params, id, jsonrpc } = req.body;
+      if (!method) {
       return res.status(400).json({ error: 'method required' });
     }
 
@@ -1616,10 +1617,6 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
         return res.json(cached.data);
       }
     }
-
-    // 8s hard timeout on upstream RPC call to avoid Heroku H12 / 502
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const response = await fetch(rpcUrl, {
       method: 'POST',
