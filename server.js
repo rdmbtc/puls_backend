@@ -8745,6 +8745,12 @@ app.get('/api/economy/feed', generalLimiter, async (req, res) => {
       }
     }
 
+    const labelFor = (addr) => {
+      const low = (addr || '').toLowerCase();
+      if (tracked[low]) return { address: addr, label: tracked[low].label };
+      return { address: addr, label: low ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'Unknown' };
+    };
+
     const feed = usdcItems.slice(0, limit).map((it) => {
       const from = it.from?.hash || '';
       const to = it.to?.hash || '';
