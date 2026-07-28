@@ -6154,13 +6154,21 @@ async function resolveMarketByName(name, feed) {
 }
 
 // budget + market and executes the buy autonomously from the agent wallet.
-app.post('/api/agent/chat', apiKeyOrAuth, strictLimiter, async (req, res) => {
+app.post('/api/agent/chat', strictLimiter, async (req, res) => {
   try {
     const { userId, message } = req.body;
     if (!userId || !message) return res.status(400).json({ error: 'userId and message required' });
 
-    const agent = await getAgent(userId);
-    if (!agent) return res.status(400).json({ error: 'Agent not started' });
+    let agent = await getAgent(userId);
+    if (!agent) {
+      try {
+        const wallet = await getOrCreateAgentWallet(userId);
+        if (wallet) {
+          agent = { walletId: wallet.walletId, address: wallet.address, balance: wallet.usdcBalance || '0', exactBalance: wallet.usdcBalance || '0' };
+        }
+      } catch (_) {}
+    }
+    if (!agent) return res.status(400).json({ error: 'Agent not started. Please call /api/agent/start first or provide a valid user.' });
 
     // Budget = the agent wallet's own balance (on-chain cap, cannot overspend).
     const remaining = parseFloat(agent.balance) || 0;
