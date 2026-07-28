@@ -46,6 +46,7 @@ import { initRawWs } from './lib/socketws.js';
 import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
 import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
 import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, osClient } from './lib/opensearch.js';
+import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware } from './lib/redis.js';
 
 // Auto-index events via eventBus
 if (osClient) {
@@ -7167,6 +7168,16 @@ app.get('/api/search', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Valkey/Redis Status & Cache Health
+app.get('/api/redis/status', (req, res) => {
+  res.json({
+    enabled: Boolean(redisClient),
+    status: redisClient ? redisClient.status : 'disabled',
+    provider: 'Aiven Valkey / Redis',
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.get('/robots.txt', (req, res) => {
