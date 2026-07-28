@@ -3202,8 +3202,9 @@ function parseLlmJson(text) {
 }
 
 async function generateMarketInsight(slug) {
-  // Gather market context (Polymarket first, then our own DB for custom markets)
-  const ctx = { question: null, description: '', yesPrice: null, endDate: null, volume: null, change24h: null };
+  // 15s total timeout to beat Heroku H12 / 30s router limit
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const arr = await fetchGamma(`/markets?slug=${encodeURIComponent(slug)}`);
     const m = Array.isArray(arr) ? arr[0] : null;
@@ -3252,10 +3253,11 @@ Rules: factors are short (max 14 words each), concrete and specific to this ques
     const raw = await llmComplete([
       { role: 'system', content: sys },
       { role: 'user', content: user },
-    ]);
+    ], { signal: controller.signal });
     const parsed = parseLlmJson(raw);
     const lean = ['YES', 'NO', 'UNCERTAIN'].includes(parsed.lean) ? parsed.lean : 'UNCERTAIN';
     const confidence = ['low', 'medium', 'high'].includes(parsed.confidence) ? parsed.confidence : 'medium';
+    clearTimeout(timeoutId);
     return {
       slug,
       question: ctx.question,
@@ -3268,6 +3270,7 @@ Rules: factors are short (max 14 words each), concrete and specific to this ques
       generatedAt: new Date().toISOString(),
     };
   } catch (e) {
+    clearTimeout(timeoutId);
     console.error(`[Insight] LLM failed for ${slug}, using quantitative fallback:`, e.message);
     const q = quantInsight(slug, ctx);
     q.sources = (research.sources || []).slice(0, 3);
@@ -3319,8 +3322,13 @@ function quantInsight(slug, ctx) {
 }
 
 // GET /api/market/insight?slug=...
-app.get('/api/market/insight', insightLimiter, async (req, res) => {
-  try {
+  // 25s timeout to beat Heroku H12 (30s)
+  app.get('/api/market/insight', insightLimiter, async (req, res) => {
+    const timeoutMs = 25000;
+    const timer = setTimeout(() => {
+      if (!res.headersSent) res.status(504).json({ error: 'Insight timeout', path: req.path });
+    }, timeoutMs);
+    try {
     const slug = (req.query.slug || '').toString().trim();
     if (!slug) return res.status(400).json({ error: 'slug is required' });
 
@@ -3341,8 +3349,11 @@ app.get('/api/market/insight', insightLimiter, async (req, res) => {
         .finally(() => insightInflight.delete(slug));
       insightInflight.set(slug, p);
     }
-    res.json(await p);
+    const data = await p;
+    clearTimeout(timer);
+    res.json(data);
   } catch (e) {
+    clearTimeout(timer);
     console.error('insight error:', e.message);
     res.status(500).json({ error: e.message });
   }
