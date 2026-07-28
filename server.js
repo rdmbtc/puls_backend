@@ -182,12 +182,28 @@ app.use((req, res, next) => {
 });
 
 // CORS: lock down to known origins when ALLOWED_ORIGINS is set (comma-separated).
-// Falls back to permissive mode when unset so local dev keeps working.
+// Always allow pulsmarket.tech subdomains, vercel, and localhost.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-app.use(allowedOrigins.length ? cors({ origin: allowedOrigins, credentials: true }) : cors());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (!allowedOrigins.length) return callback(null, true);
+    if (
+      allowedOrigins.includes(origin) ||
+      /\.pulsmarket\.tech$/.test(origin) ||
+      /pulsmarket\.tech$/.test(origin) ||
+      /localhost|127\.0\.0\.1/.test(origin) ||
+      /vercel\.app$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
+}));
 // Capture the raw request body so we can verify Circle's ECDSA webhook
 // signature over the exact bytes Circle signed (re-serializing the parsed JSON
 // would change key order/whitespace and break verification).
@@ -1608,7 +1624,14 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
       }),
     });
 
-    const data = await response.json();
+    let data;
+    try {
+      const text = await response.text();
+      data = JSON.parse(text);
+    } catch (parseErr) {
+      console.warn('[RPC Proxy] Non-JSON response from upstream RPC:', parseErr.message);
+      return res.status(502).json({ jsonrpc: '2.0', id: id || 1, error: { code: -32603, message: 'Upstream RPC node returned non-JSON' } });
+    }
 
     if (isCacheable && data && !data.error) {
       rpcCache.set(cacheKey, { data, ts: Date.now() });
@@ -2330,7 +2353,9 @@ app.get('/api/market/resolution-status', async (req, res) => {
     if (!slug) return res.status(400).json({ error: 'slug required' });
 
     const cached = deployedMarketsCache.get(slug);
-    if (!cached) return res.status(404).json({ error: 'Market not deployed' });
+    if (!cached) {
+      return res.json({ mode: 'direct', deployed: false, resolved: false, outcome: null, contractAddress: null });
+    }
 
     const base = {
       contractAddress: cached.contractAddress,
