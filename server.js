@@ -6211,9 +6211,9 @@ async function resolveMarketByName(name, feed) {
 }
 
 // budget + market and executes the buy autonomously from the agent wallet.
-  // Hard timeout at 25s to beat Heroku's 30s H12 limit.
+  // Hard timeout at 28s to beat Heroku's 30s H12 limit (LLM retries can take time).
   app.post('/api/agent/chat', strictLimiter, async (req, res) => {
-    const timeoutMs = 25000;
+    const timeoutMs = 28000;
     const timer = setTimeout(() => {
       if (!res.headersSent) res.status(504).json({ error: 'Agent timeout', path: req.path });
     }, timeoutMs);
@@ -6314,13 +6314,13 @@ Output ONLY the JSON object.`;
 
     let intent = { action: 'none', reply: '' };
     try {
-      // LLM call with 25s timeout to fit within 60s Heroku limit + buffer for trade execution
+      // LLM call with 20s timeout (endpoint is 28s, leave buffer for trade execution)
       const llmPromise = llmComplete([
         { role: 'system', content: sys },
         { role: 'user', content: message },
       ]);
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('LLM timeout')), 25000)
+        setTimeout(() => reject(new Error('LLM timeout')), 20000)
       );
       const raw = await Promise.race([llmPromise, timeoutPromise]);
       const m = raw.match(/\{[\s\S]*\}/);
