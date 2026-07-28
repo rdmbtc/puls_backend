@@ -3,7 +3,7 @@
 -- Run this in Supabase Dashboard → SQL Editor.
 
 CREATE OR REPLACE FUNCTION get_protocol_stats()
-RETURNS JSON AS $$
+RETURNS JSON AS $func$
 DECLARE
   result JSON;
 BEGIN
@@ -24,4 +24,4 @@ BEGIN
   FROM trades WHERE state = 'COMPLETE';
   RETURN result;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$func$ LANGUAGE plpgsql SECURITY DEFINER;
