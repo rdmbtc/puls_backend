@@ -5772,11 +5772,17 @@ async function llmComplete(messages, opts = {}) {
 function formatForApp(text) {
   if (!text || typeof text !== 'string') return text;
   return text
-    // Strip C0 control chars that break Postgres jsonb inserts. NULL bytes
-    // (\u0000) in LLM output or scraped web content make PostgREST reject the
-    // whole row with "invalid input syntax for type json" — which silently
-    // killed every creator-agent signal publish. Keep tab/newline/CR.
+    // Strip C0 control chars AND unpaired UTF-16 surrogates that break
+    // Postgres jsonb inserts. NULL bytes (\u0000) and lone surrogates
+    // (\uD800-\uDFFF without their pair) in LLM output or scraped web content
+    // make PostgREST reject the whole row with "invalid input syntax for type
+    // json" — which silently killed every creator-agent signal publish.
+    // JSON.stringify emits lone surrogates verbatim, which Postgres' JSON
+    // parser rejects. Keep tab/newline/CR. Strip surrogates in two passes so
+    // we never remove a valid surrogate pair (e.g. emoji = high+low).
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')      // lone high surrogate
+    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')    // lone low surrogate
     // ATX headings (#, ##, ### )  a bold line
     .replace(/^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$/gm, '*$1*')
     // bold+italic ***x***  *x*
