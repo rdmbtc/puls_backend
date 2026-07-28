@@ -45,6 +45,20 @@ import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
 import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
 import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
+import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, osClient } from './lib/opensearch.js';
+
+// Auto-index events via eventBus
+if (osClient) {
+  eventBus.on(EVENTS.MARKET_ACTIVATED, (evt) => {
+    if (evt?.slug) indexMarket({ slug: evt.slug, deadline: evt.deadline, resolved: false }).catch(() => {});
+  });
+  eventBus.on(EVENTS.MARKET_RESOLVED, (evt) => {
+    if (evt?.slug) indexMarket({ slug: evt.slug, resolved: true, outcome: evt.outcome }).catch(() => {});
+  });
+  eventBus.on(EVENTS.SIGNAL_PUBLISHED, (sig) => {
+    if (sig) indexSignal(sig).catch(() => {});
+  });
+}
 
 // Prevent unhandled promise rejections from crashing the server.
 // Report to Sentry (if configured) so we get paged, not just a log line.
@@ -7136,6 +7150,25 @@ app.post('/api/support/tickets/:ticketId/messages', authenticateUser, async (req
 // Limit-order matching is now event-driven (see scheduleLimitOrderCheck above);
 // the 20s poll has been removed.
 
+// Semantic search across all Puls data (OpenSearch RAG)
+app.get('/api/search', async (req, res) => {
+  try {
+    const { q, type = 'all', limit = 10 } = req.query;
+    if (!q) return res.status(400).json({ error: 'q parameter required' });
+    if (!osClient) return res.status(503).json({ error: 'OpenSearch not configured' });
+
+    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 10));
+    const results = {};
+    if (type === 'all' || type === 'markets') results.markets = await searchMarkets(q, parsedLimit);
+    if (type === 'all' || type === 'signals') results.signals = await searchSignals(q, parsedLimit);
+    if (type === 'all' || type === 'decisions') results.decisions = await searchDecisions(q, null, parsedLimit);
+
+    res.json(results);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/robots.txt', (req, res) => {
   res.type('text/plain');
   res.send('User-agent: *\nDisallow: /\n');
@@ -7173,6 +7206,9 @@ app.use((err, req, res, _next) => {
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
   console.log(`[cache] ${JSON.stringify(cache.stats())}`);
+  if (osClient) {
+    initIndices().catch(e => console.warn('[opensearch] init failed:', e.message));
+  }
   console.log(`[UMA] Optimistic Oracle resolution: ${UMA_RESOLUTION && UMA_ADAPTER_ADDRESS ? `ENABLED (adapter ${UMA_ADAPTER_ADDRESS}, oracle ${UMA_OOV2_ADDRESS})` : 'disabled (legacy direct resolve)'}`);
   console.log(`[Wallets] account type: ${WALLET_ACCOUNT_TYPE}; Circle webhook signature enforce: ${CIRCLE_WEBHOOK_ENFORCE}`);
   await loadDeployedMarkets();
