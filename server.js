@@ -8846,7 +8846,7 @@ const swarm = registerSwarm(app, {
 // trading + deploying markets on-chain (each trade = viem writeContract that
 // blocks the event loop for 5-10s  503 + CORS errors on 512MB dyno).
 if (typeof swarm.start === 'function') {
-  setTimeout(() => swarm.start(), 90 * 1000);
+  setTimeout(() => swarm.start(), 5 * 1000);
 }
 
 // Autonomous streaming agent: a trader agent
