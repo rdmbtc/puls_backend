@@ -5772,6 +5772,11 @@ async function llmComplete(messages, opts = {}) {
 function formatForApp(text) {
   if (!text || typeof text !== 'string') return text;
   return text
+    // Strip C0 control chars that break Postgres jsonb inserts. NULL bytes
+    // (\u0000) in LLM output or scraped web content make PostgREST reject the
+    // whole row with "invalid input syntax for type json" — which silently
+    // killed every creator-agent signal publish. Keep tab/newline/CR.
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     // ATX headings (#, ##, ### )  a bold line
     .replace(/^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$/gm, '*$1*')
     // bold+italic ***x***  *x*
