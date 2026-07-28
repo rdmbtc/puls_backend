@@ -6222,7 +6222,9 @@ app.post('/api/agent/chat', strictLimiter, async (req, res) => {
     // agent + market AI use. Best-effort; never blocks the chat.
     let research = { brief: '', sources: [] };
     try {
-      research = await researchQuestion(message.slice(0, 200), 4);
+      const researchPromise = researchQuestion(message.slice(0, 200), 4);
+      const timeoutPromise = new Promise(res => setTimeout(() => res({ brief: '', sources: [] }), 4500));
+      research = await Promise.race([researchPromise, timeoutPromise]);
     } catch (e) {
       console.error('[agent/chat] research failed:', e.message);
     }
