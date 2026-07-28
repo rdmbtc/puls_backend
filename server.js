@@ -288,7 +288,9 @@ app.use(sentryRequestHandler); // Sentry performance + error instrumentation
 // Prevents hung endpoints from consuming a connection forever. Trade endpoints
 // get 60s (on-chain settlement can be slow); everything else gets 30s.
 app.use((req, res, next) => {
-  const timeout = req.path.startsWith('/api/trade') ? 60000 : 30000;
+  // Agent chat needs longer timeout for LLM reasoning + trade execution
+  // RPC proxy also gets more time for upstream node latency
+  const timeout = req.path.startsWith('/api/trade') || req.path.startsWith('/api/agent/chat') || req.path.startsWith('/api/rpc-proxy') ? 60000 : 30000;
   const timer = setTimeout(() => {
     if (!res.headersSent) {
       res.status(504).json({ error: 'Gateway timeout', path: req.path, method: req.method });
@@ -1590,8 +1592,11 @@ const rpcProxyLimiter = rateLimit({
 });
 
 // POST /api/rpc-proxy
-app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
-  try {
+  app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
+    // 8s timeout for upstream RPC (Heroku 30s limit, leave headroom)
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
     const { method, params, id, jsonrpc } = req.body;
     if (!method) {
       return res.status(400).json({ error: 'method required' });
@@ -1613,6 +1618,10 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
       }
     }
 
+    // 8s hard timeout on upstream RPC call to avoid Heroku H12 / 502
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     const response = await fetch(rpcUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1622,7 +1631,9 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
         id: id || 1,
         jsonrpc: jsonrpc || '2.0',
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     let data;
     try {
@@ -6193,8 +6204,13 @@ async function resolveMarketByName(name, feed) {
 }
 
 // budget + market and executes the buy autonomously from the agent wallet.
-app.post('/api/agent/chat', strictLimiter, async (req, res) => {
-  try {
+  // Hard timeout at 25s to beat Heroku's 30s H12 limit.
+  app.post('/api/agent/chat', strictLimiter, async (req, res) => {
+    const timeoutMs = 25000;
+    const timer = setTimeout(() => {
+      if (!res.headersSent) res.status(504).json({ error: 'Agent timeout', path: req.path });
+    }, timeoutMs);
+    try {
     const { userId, message } = req.body;
     if (!userId || !message) return res.status(400).json({ error: 'userId and message required' });
 
@@ -6291,10 +6307,15 @@ Output ONLY the JSON object.`;
 
     let intent = { action: 'none', reply: '' };
     try {
-      const raw = await llmComplete([
+      // LLM call with 25s timeout to fit within 60s Heroku limit + buffer for trade execution
+      const llmPromise = llmComplete([
         { role: 'system', content: sys },
         { role: 'user', content: message },
       ]);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('LLM timeout')), 25000)
+      );
+      const raw = await Promise.race([llmPromise, timeoutPromise]);
       const m = raw.match(/\{[\s\S]*\}/);
       if (m) intent = JSON.parse(m[0]);
       else intent.reply = raw;
@@ -6400,8 +6421,10 @@ Output ONLY the JSON object.`;
       reputation: agentRepCount.get(`agent_${userId}`) ?? 0,
       sources: (research.sources || []).slice(0, 3),
     });
+    clearTimeout(timer);
   } catch (e) {
     if (res.headersSent) return;
+    clearTimeout(timer);
     console.error('agent chat error:', e.message);
     res.status(500).json({ error: e.message });
   }
