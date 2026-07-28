@@ -5767,31 +5767,34 @@ async function llmComplete(messages, opts = {}) {
 }
 
 // The Puls app renders Telegram/Slack-style markdown where a SINGLE asterisk = bold.
-// LLMs emit standard markdown (**bold**, ## headings), so normalise their prose to
-// the app's flavour before sending it to the client. Idempotent & safe on plain text.
-function formatForApp(text) {
-  if (!text || typeof text !== 'string') return text;
-  return text
-    // Strip C0 control chars AND unpaired UTF-16 surrogates that break
-    // Postgres jsonb inserts. NULL bytes (\u0000) and lone surrogates
-    // (\uD800-\uDFFF without their pair) in LLM output or scraped web content
-    // make PostgREST reject the whole row with "invalid input syntax for type
-    // json" — which silently killed every creator-agent signal publish.
-    // JSON.stringify emits lone surrogates verbatim, which Postgres' JSON
-    // parser rejects. Keep tab/newline/CR. Strip surrogates in two passes so
-    // we never remove a valid surrogate pair (e.g. emoji = high+low).
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')      // lone high surrogate
-    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')    // lone low surrogate
-    // ATX headings (#, ##, ### )  a bold line
-    .replace(/^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$/gm, '*$1*')
-    // bold+italic ***x***  *x*
-    .replace(/\*\*\*([^\n*][^\n]*?)\*\*\*/g, '*$1*')
-    // bold **x**  *x*
-    .replace(/\*\*([^\n*][^\n]*?)\*\*/g, '*$1*')
-    // __bold__  *x*
-    .replace(/__([^\n_][^\n]*?)__/g, '*$1*');
-}
+ // LLMs emit standard markdown (**bold**, ## headings), so normalise their prose to
+ // the app's flavour before sending it to the client. Idempotent & safe on plain text.
+ function formatForApp(text) {
+   if (!text || typeof text !== 'string') return text;
+   return text
+     // Sanitize ill-formed Unicode (lone surrogates, non-characters, etc.) via
+     // UTF-8 round-trip. TextEncoder/Decoder with fatal=false replaces all
+     // malformed sequences with U+FFFD (�), guaranteeing well-formed output.
+     // This protects ALL downstream inserts (blog posts, comments, agent chat,
+     // creator_signals) from PostgREST "invalid input syntax for type json"
+     // failures caused by LLM output or scraped web content carrying
+     // unpaired surrogates (e.g. from emoji split by slice(0, N)).
+     .replace(/^/, (s) => {
+       try {
+         return new TextDecoder('utf-8', { fatal: false }).decode(
+           new TextEncoder().encode(s)
+         );
+       } catch { return s; }
+     })
+     // ATX headings (#, ##, ### )  a bold line
+     .replace(/^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$/gm, '*$1*')
+     // bold+italic ***x***  *x*
+     .replace(/\*\*\*([^\n*][^\n]*?)\*\*\*/g, '*$1*')
+     // bold **x**  *x*
+     .replace(/\*\*([^\n*][^\n]*?)\*\*/g, '*$1*')
+     // __bold__  *x*
+     .replace(/__([^\n_][^\n]*?)__/g, '*$1*');
+ }
 
 // Create (or fetch) a separate per-user agent wallet, funded from the user up to budget.
 app.post('/api/agent/start', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
