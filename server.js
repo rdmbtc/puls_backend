@@ -5608,6 +5608,7 @@ async function recordAgentReputation(agentKey, agentAddress, score, tag) {
 // Completes a chat from ONE provider, dispatching by wire format.
 async function llmCompleteOne(provider, messages, signal) {
   if (provider.format === 'gemini') return llmCompleteGemini(provider, messages, signal);
+  if (provider.format === 'antigravity') return llmCompleteAntigravity(provider, messages, signal);
   if (provider.format === 'cohere') return llmCompleteCohere(provider, messages, signal);
   if (provider.format === 'ollama') return llmCompleteOllama(provider, messages, signal);
   return llmCompleteOpenAI(provider, messages, signal);
@@ -5671,6 +5672,36 @@ async function llmCompleteGemini(provider, messages, signal) {
   const j = await r.json();
   const parts = j.candidates?.[0]?.content?.parts || [];
   return parts.map(p => p.text || '').join('').trim();
+}
+
+// Google Antigravity (Interactions API) — agentic model, not standard chat.
+// Maps OpenAI-style messages to Interactions API: system → input prefix, history → concatenated input.
+async function llmCompleteAntigravity(provider, messages, signal) {
+  const sys = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+  const history = messages.filter(m => m.role !== 'system')
+    .map(m => `${m.role === 'assistant' ? 'Model' : 'User'}: ${m.content}`)
+    .join('\n');
+  const input = [sys, history].filter(Boolean).join('\n\n');
+  const url = provider.url.replace(/\/+$/, '') + '/interactions';
+  const body = {
+    agent: provider.model,
+    input,
+    environment: 'remote'
+  };
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'x-goog-api-key': provider.key, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json();
+  // Find last model_output step (actual response), fallback to last summary
+  const modelOutput = [...j.steps || []].reverse().find(s => s.type === 'model_output');
+  if (modelOutput?.content?.[0]?.text) return modelOutput.content[0].text.trim();
+  const lastStep = j.steps?.[j.steps.length - 1];
+  const summary = lastStep?.summary?.[0]?.text || '';
+  return summary.trim();
 }
 
 // OpenAI-compatible streaming SSE chat completion. Falls back to reading the
