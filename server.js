@@ -8643,8 +8643,22 @@ async function houseAgentTick() {
     const alpha = await houseAgentPayForAlpha(agent.walletId, agent.address);
 
     const candidates = await houseAgentResearch();
-    if (candidates.length === 0 || candidates[0].edge < 0.02) {
-      console.log('[Pulse] no opportunity above threshold this cycle');
+    if (candidates.length === 0) {
+      console.log('[Pulse] no active markets to evaluate this cycle');
+      await supabase.from('notifications').insert({
+        user_id: HOUSE_AGENT_USER,
+        title: 'No +EV trade',
+        type: 'agent_decision',
+        read: true,
+        message: JSON.stringify({
+          action: 'skip',
+          question: 'No active markets to evaluate',
+          reasoning: 'No unresolved markets with >1h until deadline found in the deployed set. Standing by.',
+          brain: 'risk',
+          evaluated: 0,
+          bestEdge: 0,
+        }),
+      }).catch(e => console.warn('[Pulse] publish skip error:', e.message));
       return;
     }
 
