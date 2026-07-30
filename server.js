@@ -325,8 +325,16 @@ const authenticateUser = async (req, res, next) => {
       return next();
     }
 
+    let token = null;
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.query?.auth_token) {
+      token = req.query.auth_token;
+    } else if (req.body?.auth_token) {
+      token = req.body.auth_token;
+    }
+    if (!token) {
       // Ensure CORS headers are on 401 responses so browsers don't mask the real error
       const origin = req.headers.origin;
       if (origin && allowedOrigins.includes(origin)) {
@@ -335,7 +343,6 @@ const authenticateUser = async (req, res, next) => {
       }
       return res.status(401).json({ error: 'Unauthorized: Missing token' });
     }
-    const token = authHeader.split(' ')[1];
     // Decoded JWT payloads (user id, email, etc.) must never be logged to
     // stdout  Heroku logs are retained and visible to anyone with dashboard
     // access. This block previously dumped the full header + payload on every

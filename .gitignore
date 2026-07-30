@@ -12,6 +12,7 @@ docs/ceo-twitter-content.md
 
 # Local data/log files — never commit these (they may contain user data)
 heroku_logs.txt
+heroku_logs_*.txt
 pnl_data.json
 *.log
 
@@ -22,6 +23,11 @@ logs.txt
 
 # Temporary/ad-hoc debug scripts — NEVER commit (often contain hardcoded DB credentials)
 scratch/
+
+# Ad-hoc check/migration scripts that may contain hardcoded credentials
+check_*.js
+check_*.cjs
+run_all_*.cjs
 
 # Migration/debug scripts with hardcoded Neon credentials — NEVER commit
 *_neon.js
