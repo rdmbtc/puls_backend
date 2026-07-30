@@ -388,8 +388,7 @@ const authenticateUser = async (req, res, next) => {
       ? user.id
       : `supabase_${user.id}`;
     if (requestedUserId && requestedUserId !== expectedUserId) {
-      console.warn(`[Auth Warning] UserId mismatch. Authenticated: ${expectedUserId}, Requested: ${requestedUserId}`);
-      return res.status(403).json({ error: 'Forbidden: User identity mismatch' });
+      console.warn(`[Auth Notice] UserId mismatch. Authenticated: ${expectedUserId}, Requested: ${requestedUserId}. Overriding to authenticated identity.`);
     }
     
     // Force override query and body parameters to the verified userId to eliminate IDOR
@@ -1759,6 +1758,7 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
     // 8s timeout for upstream RPC (Heroku 30s limit, leave headroom)
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const rpcUrl = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network';
     try {
       const { method, params, id, jsonrpc } = req.body;
       if (!method) {
