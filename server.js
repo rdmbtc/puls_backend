@@ -662,6 +662,41 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
 });
 
+//  Direct-auth token refresh (no full OAuth redirect needed).
+// Flutter calls this when _freshAccessToken finds an expired direct_auth
+// and has no Supabase session to fall back to. We verify the old token
+// (userId + signature), then issue a fresh one with a new 30d expiry.
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const bearer = req.headers.authorization || '';
+    const token = bearer.startsWith('Bearer ') ? bearer.slice(7) : (req.body?.token || '');
+    if (!token) return res.status(401).json({ error: 'Missing token' });
+    const parts = token.split('.');
+    if (parts.length < 3) return res.status(401).json({ error: 'Invalid token format' });
+    if (parts[2] !== 'signed_puls_direct') return res.status(401).json({ error: 'Invalid token signature' });
+    let payload;
+    try { payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8')); } catch (_) {
+      return res.status(401).json({ error: 'Invalid token payload' });
+    }
+    if (!payload.sub) return res.status(401).json({ error: 'Invalid token: missing sub' });
+    // Verify user still exists
+    const { data: profile } = await supabase.from('profiles').select('user_id').eq('user_id', payload.sub).maybeSingle();
+    if (!profile) return res.status(401).json({ error: 'User not found' });
+    const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const jwtPayload = Buffer.from(JSON.stringify({
+      sub: payload.sub,
+      email: payload.email || '',
+      user_metadata: payload.user_metadata || {},
+      exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600),
+    })).toString('base64url');
+    const newToken = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
+    res.json({ token: newToken, userId: payload.sub });
+  } catch (e) {
+    console.error('[auth/refresh] error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 //  Circle API Circuit Breaker 
 // After 5 consecutive failures, stops calling Circle for 60s to avoid
 // cascading rate-limit / outage spirals. Resets on any success.
