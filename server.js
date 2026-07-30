@@ -83,6 +83,27 @@ process.on('uncaughtException', (err, origin) => {
   // truly becomes unresponsive, but we give it a chance to recover.
 });
 
+// ── Graceful Shutdown ─────────────────────────────────────────────────────
+// Heroku sends SIGTERM on restart. We must drain connections, clear timers,
+// and close the HTTP server so in-flight requests finish cleanly.
+const shutdownHandlers = [];
+function onShutdown(fn) { shutdownHandlers.push(fn); }
+
+async function gracefulShutdown(signal) {
+  console.log(`[shutdown] ${signal} received — draining connections...`);
+  // Clear all tracked intervals
+  for (const id of intervalIds) clearInterval(id);
+  // Run registered cleanup handlers (close DB pools, flush caches, etc.)
+  await Promise.allSettled(shutdownHandlers.map(fn => fn()));
+  // Close HTTP server — stops accepting new requests, drains keep-alives
+  await new Promise(resolve => server.close(resolve));
+  console.log('[shutdown] complete');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // Real rate limiters (previously no-ops). Tune via env if needed.
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -212,48 +233,31 @@ app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 // Lightweight liveness probe (no DB, no rate-limit) for uptime monitors and
 // Lightweight event-loop lag meter  proves whether the box is actually working.
 let __elLagMs = 0;
-{ let _last = Date.now(); const _t = setInterval(() => { const now = Date.now(); __elLagMs = Math.max(0, now - _last - 1000); _last = now; }, 1000); if (_t.unref) _t.unref(); }
+{ let _last = Date.now(); safeInterval('eventLoopLag', () => { const now = Date.now(); __elLagMs = Math.max(0, now - _last - 1000); _last = now; }, 1000); }
 
 // Memory pressure relief: every 5 minutes, clear caches that grow over time.
 // This is the safety net for the 512MB Heroku dyno  the caches have their
 // own caps, but this sweep catches anything that slipped through (e.g. entries
 // with future timestamps, or caches added in future code that don't have caps).
-setInterval(() => {
+safeInterval('cacheSweep', () => {
   try {
-    if (typeof rpcCache !== 'undefined' && rpcCache.size > 300) {
-      rpcCache.clear();
-    }
-    if (typeof _balanceCache !== 'undefined' && _balanceCache.size > 150) {
-      _balanceCache.clear();
-    }
-    if (typeof insightCache !== 'undefined' && insightCache.size > 50) {
-      insightCache.clear();
-    }
-    if (typeof _explorerCache !== 'undefined' && _explorerCache.size > 50) {
-      _explorerCache.clear();
-    }
-    if (typeof leaderboardCache !== 'undefined' && leaderboardCache.size > 20) {
-      leaderboardCache.clear();
-    }
-    if (typeof userTrades !== 'undefined' && userTrades.size > 100) {
-      userTrades.clear();
-    }
-    if (typeof marketTrades !== 'undefined' && marketTrades.size > 100) {
-      marketTrades.clear();
-    }
-    if (typeof llmHeavyCooldown !== 'undefined' && llmHeavyCooldown.size > 0) {
-      llmHeavyCooldown.clear();
-    }
+    if (typeof rpcCache !== 'undefined' && rpcCache.size > 300) rpcCache.clear();
+    if (typeof _balanceCache !== 'undefined' && _balanceCache.size > 150) _balanceCache.clear();
+    if (typeof insightCache !== 'undefined' && insightCache.size > 50) insightCache.clear();
+    if (typeof _explorerCache !== 'undefined' && _explorerCache.size > 50) _explorerCache.clear();
+    if (typeof leaderboardCache !== 'undefined' && leaderboardCache.size > 20) leaderboardCache.clear();
+    if (typeof userTrades !== 'undefined' && userTrades.size > 100) userTrades.clear();
+    if (typeof marketTrades !== 'undefined' && marketTrades.size > 100) marketTrades.clear();
+    if (typeof llmHeavyCooldown !== 'undefined' && llmHeavyCooldown.size > 0) llmHeavyCooldown.clear();
+    if (typeof walletAddressCache !== 'undefined' && walletAddressCache.size > 500) walletAddressCache.clear();
+    if (typeof agentStrategies !== 'undefined' && agentStrategies.size > 500) agentStrategies.clear();
     if (typeof deployedMarketsCache !== 'undefined' && deployedMarketsCache.size > 2000) {
       const keys = Array.from(deployedMarketsCache.keys());
-      for (let i = 0; i < keys.length - 1000; i++) {
-        deployedMarketsCache.delete(keys[i]);
-      }
+      for (let i = 0; i < keys.length - 1000; i++) deployedMarketsCache.delete(keys[i]);
     }
-    // Force GC if available (--expose-gc flag or Node with V8 inspector)
     if (typeof global.gc === 'function') global.gc();
   } catch (_) {}
-}, 300_000).unref?.();
+}, 300_000);
 
 // Cloudflare/load-balancer health checks. Always fast, never cached.
 app.get('/api/health', (req, res) => {
@@ -1503,7 +1507,7 @@ async function ensureWalletSet() {
   return walletSetId;
 }
 
-const walletAddressCache = new Map();
+const walletAddressCache = new Map(); // walletId -> address (legacy, TTL-managed via _walletAddrCache)
 
 // Balance cache: { address -> { balance, exact, ts } }  avoids hitting the RPC
 // on every /api/agents/roster call (which fetches 6+ wallets).  Bounded: a
@@ -1514,14 +1518,13 @@ const BALANCE_CACHE_TTL_MS = 15_000; // 15s  fresh enough for UI
 const BALANCE_CACHE_MAX = 500; // hard cap (distinct wallet addresses)
 
 // Periodic sweep: evict expired balance-cache entries every 60s so the Map
-// doesn't leak memory on a long-running dyno. `.unref()` so it never keeps
-// the process alive on shutdown.
-setInterval(() => {
+// doesn't leak memory on a long-running dyno.
+safeInterval('balanceSweep', () => {
   const now = Date.now();
   for (const [k, v] of _balanceCache) {
     if (now - v.ts > BALANCE_CACHE_TTL_MS * 2) _balanceCache.delete(k);
   }
-}, 60_000).unref?.();
+}, 60_000);
 
 // Wallet address cache: { walletId -> { address, ts } }  5 min TTL.
 // Prevents repeated Circle API calls for the same wallet address.
@@ -1532,9 +1535,19 @@ let _circleInFlight = 0;
 const _circleQueue = [];
 const CIRCLE_MAX_CONCURRENT = 2;
 
+const CIRCLE_QUEUE_TIMEOUT_MS = 15_000; // max wait in queue before throwing
 async function _circleThrottle(fn) {
   if (_circleInFlight >= CIRCLE_MAX_CONCURRENT) {
-    await new Promise(resolve => _circleQueue.push(resolve));
+    let resolve;
+    const waitPromise = new Promise(r => { resolve = r; _circleQueue.push(r); });
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Circle queue timeout — too many concurrent calls')), CIRCLE_QUEUE_TIMEOUT_MS)
+    );
+    await Promise.race([waitPromise, timeoutPromise]);
+    // If the timer won the race, remove our resolve from the queue
+    if (resolve && _circleQueue.includes(resolve)) {
+      _circleQueue.splice(_circleQueue.indexOf(resolve), 1);
+    }
   }
   _circleInFlight++;
   try {
@@ -9091,6 +9104,7 @@ const swarm = registerSwarm(app, {
 // blocks the event loop for 5-10s  503 + CORS errors on 512MB dyno).
 if (typeof swarm.start === 'function') {
   setTimeout(() => swarm.start(), 5 * 1000);
+  if (typeof swarm.stop === 'function') onShutdown(() => swarm.stop());
 }
 
 // Autonomous streaming agent: a trader agent
