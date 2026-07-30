@@ -3108,11 +3108,9 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
 
     // Derive or enforce the correct userId from JWT token if user is authenticated
     if (req.user) {
-      const expectedUserId = `supabase_${req.user.id}`;
-      // In case they tampered with the query param, override/assert it matches
-      if (userId !== expectedUserId) {
-        return res.status(403).json({ error: 'Forbidden: User identity mismatch' });
-      }
+      const expectedUserId = (typeof req.user.id === 'string' && (req.user.id.startsWith('supabase_') || req.user.id.startsWith('google_')))
+        ? req.user.id
+        : `supabase_${req.user.id}`;
       userId = expectedUserId;
     }
 
