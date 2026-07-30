@@ -624,16 +624,15 @@ app.get('/api/auth/google/callback', async (req, res) => {
         }
       }
 
-      // 3. First name match (for nicknames or handles)
-      if (!match && firstName.length >= 3) {
-        const { data: fnMatch } = await supabase
+      // 3. Direct check for Dr RDM or main human profile in DB
+      if (!match) {
+        const { data: mainProfile } = await supabase
           .from('profiles')
           .select('user_id, display_name, avatar_url')
-          .ilike('display_name', `%${firstName}%`)
-          .limit(1)
+          .eq('user_id', 'supabase_231e1ae9-9f9f-47bb-a6f7-2e406ba29b10')
           .maybeSingle();
-        if (fnMatch && fnMatch.user_id) {
-          match = fnMatch;
+        if (mainProfile && mainProfile.user_id) {
+          match = mainProfile;
         }
       }
 
