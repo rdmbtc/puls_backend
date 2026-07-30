@@ -601,7 +601,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       let match = null;
       const { data: exactMatch } = await supabase
         .from('profiles')
-        .select('user_id')
+        .select('user_id, display_name, avatar_url')
         .or(`display_name.eq."${fullName}",display_name.eq."${cleanName}",display_name.eq."${emailPrefix}"`)
         .limit(1)
         .maybeSingle();
@@ -613,7 +613,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       if (!match && cleanName.length >= 3) {
         const { data: fuzzyMatch } = await supabase
           .from('profiles')
-          .select('user_id')
+          .select('user_id, display_name, avatar_url')
           .or(`display_name.ilike."%${cleanName}%",display_name.ilike."%${emailPrefix}%"`)
           .limit(1)
           .maybeSingle();
@@ -626,7 +626,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       if (!match && firstName.length >= 3) {
         const { data: fnMatch } = await supabase
           .from('profiles')
-          .select('user_id')
+          .select('user_id, display_name, avatar_url')
           .ilike('display_name', `%${firstName}%`)
           .limit(1)
           .maybeSingle();
@@ -635,32 +635,34 @@ app.get('/api/auth/google/callback', async (req, res) => {
         }
       }
 
+      let finalDisplayName = displayName;
+      let finalAvatarUrl = avatarUrl;
+
       if (match && match.user_id) {
         userId = match.user_id;
+        if (match.display_name) finalDisplayName = match.display_name;
+        if (match.avatar_url) finalAvatarUrl = match.avatar_url;
+      } else {
+        // Only insert a new profile record if no existing profile matched
+        try {
+          await supabase.from('profiles').insert({
+            user_id: userId,
+            display_name: displayName,
+            avatar_url: avatarUrl
+          });
+        } catch (dbErr) {
+          console.error('[Google OAuth DB Insert Warning]:', dbErr.message);
+        }
       }
-    } catch (matchErr) {
-      console.error('[Google OAuth User Link Error]:', matchErr.message);
-    }
 
-    // Upsert into Aiven PostgreSQL profiles (only valid columns: user_id, display_name, avatar_url)
-    try {
-      await supabase.from('profiles').upsert({
-        user_id: userId,
-        display_name: displayName,
-        avatar_url: avatarUrl
-      }, { onConflict: 'user_id' });
-    } catch (dbErr) {
-      console.error('[Google OAuth DB Upsert Warning]:', dbErr.message);
-    }
-
-    const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-    const jwtPayload = Buffer.from(JSON.stringify({
-      sub: userId,
-      email: googleUser.email,
-      user_metadata: { full_name: displayName, avatar_url: avatarUrl },
-      exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600)
-    })).toString('base64url');
-    const token = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
+      const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const jwtPayload = Buffer.from(JSON.stringify({
+        sub: userId,
+        email: googleUser.email,
+        user_metadata: { full_name: finalDisplayName, avatar_url: finalAvatarUrl },
+        exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600)
+      })).toString('base64url');
+      const token = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
 
     res.redirect(`https://app.pulsmarket.tech/?auth_token=${token}&user_id=${userId}`);
   } catch (err) {
