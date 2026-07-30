@@ -20,6 +20,9 @@ check_tmp.js
 scripts/check_tmp.js
 logs.txt
 
+# Temporary/ad-hoc debug scripts — NEVER commit (often contain hardcoded DB credentials)
+scratch/
+
 # Migration/debug scripts with hardcoded Neon credentials — NEVER commit
 *_neon.js
 *_neon.mjs
