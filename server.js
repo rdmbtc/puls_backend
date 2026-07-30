@@ -589,6 +589,9 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const displayName = googleUser.name || googleUser.email.split('@')[0];
     const avatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${googleUser.id}`;
 
+    let finalDisplayName = displayName;
+    let finalAvatarUrl = avatarUrl;
+
     // Universal 4-Tier profile matching strategy for all existing Aiven DB users:
     try {
       const emailPrefix = googleUser.email ? googleUser.email.split('@')[0].trim() : '';
@@ -633,9 +636,6 @@ app.get('/api/auth/google/callback', async (req, res) => {
           match = fnMatch;
         }
       }
-
-      let finalDisplayName = displayName;
-      let finalAvatarUrl = avatarUrl;
 
       if (match && match.user_id) {
         userId = match.user_id;
