@@ -654,6 +654,9 @@ app.get('/api/auth/google/callback', async (req, res) => {
           console.error('[Google OAuth DB Insert Warning]:', dbErr.message);
         }
       }
+    } catch (matchErr) {
+      console.error('[Google OAuth User Link Error]:', matchErr.message);
+    }
 
       const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
       const jwtPayload = Buffer.from(JSON.stringify({
