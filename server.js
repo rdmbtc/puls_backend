@@ -585,75 +585,36 @@ app.get('/api/auth/google/callback', async (req, res) => {
       return res.redirect('https://app.pulsmarket.tech/?error=invalid_user_data');
     }
 
-    let userId = `google_${googleUser.id}`;
-    const displayName = googleUser.name || googleUser.email.split('@')[0];
-    const avatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${googleUser.id}`;
-
-    let finalDisplayName = displayName;
-    let finalAvatarUrl = avatarUrl;
-
-    // Universal 4-Tier profile matching strategy for all existing Aiven DB users:
-    try {
-      const emailPrefix = googleUser.email ? googleUser.email.split('@')[0].trim() : '';
-      const fullName = (googleUser.name || '').trim();
-      const cleanName = fullName.split('(')[0].trim();
-      const firstName = cleanName.split(' ')[0].trim();
-
-      // 1. Exact match (by full name, clean name, or email prefix)
-      let match = null;
-      const { data: exactMatch } = await supabase
-        .from('profiles')
-        .select('user_id, display_name, avatar_url')
-        .or(`display_name.eq."${fullName}",display_name.eq."${cleanName}",display_name.eq."${emailPrefix}"`)
-        .limit(1)
-        .maybeSingle();
-      if (exactMatch && exactMatch.user_id) {
-        match = exactMatch;
+    // Look up existing user by email in profiles table
+    let userId;
+    let finalDisplayName;
+    let finalAvatarUrl;
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('user_id, display_name, avatar_url')
+      .eq('email', googleUser.email)
+      .maybeSingle();
+    if (existingProfile) {
+      userId = existingProfile.user_id;
+      finalDisplayName = existingProfile.display_name;
+      finalAvatarUrl = existingProfile.avatar_url;
+      // Update avatar if Google has a better one
+      if (googleUser.picture && (!existingProfile.avatar_url || existingProfile.avatar_url.includes('dicebear'))) {
+        finalAvatarUrl = googleUser.picture;
+        await supabase.from('profiles').upsert({ user_id: userId, avatar_url: googleUser.picture }, { onConflict: 'user_id' });
       }
-
-      // 2. Fuzzy match by clean name or email prefix (case insensitive)
-      if (!match && cleanName.length >= 3) {
-        const { data: fuzzyMatch } = await supabase
-          .from('profiles')
-          .select('user_id, display_name, avatar_url')
-          .or(`display_name.ilike."%${cleanName}%",display_name.ilike."%${emailPrefix}%"`)
-          .limit(1)
-          .maybeSingle();
-        if (fuzzyMatch && fuzzyMatch.user_id) {
-          match = fuzzyMatch;
-        }
-      }
-
-      // 3. Direct check for Dr RDM or main human profile in DB
-      if (!match) {
-        const { data: mainProfile } = await supabase
-          .from('profiles')
-          .select('user_id, display_name, avatar_url')
-          .eq('user_id', 'supabase_231e1ae9-9f9f-47bb-a6f7-2e406ba29b10')
-          .maybeSingle();
-        if (mainProfile && mainProfile.user_id) {
-          match = mainProfile;
-        }
-      }
-
-      if (match && match.user_id) {
-        userId = match.user_id;
-        if (match.display_name) finalDisplayName = match.display_name;
-        if (match.avatar_url) finalAvatarUrl = match.avatar_url;
-      } else {
-        // Only insert a new profile record if no existing profile matched
-        try {
-          await supabase.from('profiles').insert({
-            user_id: userId,
-            display_name: displayName,
-            avatar_url: avatarUrl
-          });
-        } catch (dbErr) {
-          console.error('[Google OAuth DB Insert Warning]:', dbErr.message);
-        }
-      }
-    } catch (matchErr) {
-      console.error('[Google OAuth User Link Error]:', matchErr.message);
+    } else {
+      // Create new user profile
+      userId = `supabase_${crypto.randomUUID()}`;
+      finalDisplayName = googleUser.name || googleUser.email.split('@')[0];
+      finalAvatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${userId}`;
+      await supabase.from('profiles').insert({
+        user_id: userId,
+        email: googleUser.email,
+        display_name: finalDisplayName,
+        avatar_url: finalAvatarUrl,
+        bio: 'Trading prediction markets on Arc Testnet.'
+      });
     }
 
       const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
