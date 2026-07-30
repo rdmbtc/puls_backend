@@ -8791,7 +8791,7 @@ app.get('/api/agents/house', async (req, res) => {
     }
     const { data: rows } = await supabase
       .from('notifications')
-      .select('message, created_at')
+      .select('body, created_at')
       .eq('user_id', HOUSE_AGENT_USER)
       .eq('type', 'agent_decision')
       .order('created_at', { ascending: false })
