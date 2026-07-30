@@ -230,6 +230,24 @@ app.use(cors({
 // would change key order/whitespace and break verification).
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
+//  Interval manager: error-boundary wrapper for all cron jobs 
+// Collects all setInterval IDs so they can be cleared on graceful shutdown.
+// Wraps each callback in try/catch so a single throw doesn't silently kill
+// the interval (Node stops re-running it on uncaught exception).
+// MUST be defined before any safeInterval() calls below (ESM TDZ).
+const intervalIds = [];
+function safeInterval(name, fn, ms) {
+  const id = setInterval(async () => {
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`[interval:${name}] error:`, e?.message || String(e));
+    }
+  }, ms);
+  intervalIds.push(id);
+  return id;
+}
+
 // Lightweight liveness probe (no DB, no rate-limit) for uptime monitors and
 // Lightweight event-loop lag meter  proves whether the box is actually working.
 let __elLagMs = 0;
@@ -1278,24 +1296,6 @@ async function getOrDeployMarket(slug, deadlineSeconds) {
 
   return promise;
 }
-
-//  Interval manager: error-boundary wrapper for all cron jobs 
-// Collects all setInterval IDs so they can be cleared on graceful shutdown.
-// Wraps each callback in try/catch so a single throw doesn't silently kill
-// the interval (Node stops re-running it on uncaught exception).
-const intervalIds = [];
-function safeInterval(name, fn, ms) {
-  const id = setInterval(async () => {
-    try {
-      await fn();
-    } catch (e) {
-      console.error(`[interval:${name}] error:`, e?.message || String(e));
-    }
-  }, ms);
-  intervalIds.push(id);
-  return id;
-}
-
 //  Supabase helpers 
 
 async function getWalletId(userId) {
