@@ -586,17 +586,24 @@ app.get('/api/auth/google/callback', async (req, res) => {
       return res.redirect('https://app.pulsmarket.tech/?error=invalid_user_data');
     }
 
-    const userId = `google_${googleUser.id}`;
+    let userId = `google_${googleUser.id}`;
     const displayName = googleUser.name || googleUser.email.split('@')[0];
     const avatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${googleUser.id}`;
 
-    // Upsert into Aiven PostgreSQL profiles
+    // Link to existing user profile in Aiven DB by display_name if available
+    try {
+      const { data: existingProfile } = await supabase.from('profiles').select('user_id').eq('display_name', displayName).limit(1).maybeSingle();
+      if (existingProfile && existingProfile.user_id) {
+        userId = existingProfile.user_id;
+      }
+    } catch (_) {}
+
+    // Upsert into Aiven PostgreSQL profiles (only valid columns: user_id, display_name, avatar_url)
     try {
       await supabase.from('profiles').upsert({
         user_id: userId,
         display_name: displayName,
-        avatar_url: avatarUrl,
-        email: googleUser.email
+        avatar_url: avatarUrl
       }, { onConflict: 'user_id' });
     } catch (dbErr) {
       console.error('[Google OAuth DB Upsert Warning]:', dbErr.message);
