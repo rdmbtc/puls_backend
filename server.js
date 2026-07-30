@@ -384,7 +384,9 @@ const authenticateUser = async (req, res, next) => {
     }
     req.user = user;
     
-    const expectedUserId = `supabase_${user.id}`;
+    const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_')))
+      ? user.id
+      : `supabase_${user.id}`;
     if (requestedUserId && requestedUserId !== expectedUserId) {
       console.warn(`[Auth Warning] UserId mismatch. Authenticated: ${expectedUserId}, Requested: ${requestedUserId}`);
       return res.status(403).json({ error: 'Forbidden: User identity mismatch' });
@@ -602,7 +604,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
 
     const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
     const jwtPayload = Buffer.from(JSON.stringify({
-      sub: googleUser.id,
+      sub: userId,
       email: googleUser.email,
       user_metadata: { full_name: displayName, avatar_url: avatarUrl },
       exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600)
