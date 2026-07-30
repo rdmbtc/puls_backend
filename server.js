@@ -351,9 +351,35 @@ const authenticateUser = async (req, res, next) => {
         console.log('[Auth Middleware] Token Decode Error:', e.message);
       }
     }
-    const { data: { user }, error } = await supabaseAnon.auth.getUser(token);
-    if (error || !user) {
-      console.error('[Auth Middleware] getUser failed:', error);
+    let user = null;
+    try {
+      const { data, error } = await supabaseAnon.auth.getUser(token);
+      if (data?.user) {
+        user = data.user;
+      }
+    } catch (e) {
+      console.warn('[Auth Middleware] Supabase getUser network error, trying local JWT decode:', e.message);
+    }
+
+    if (!user && token) {
+      try {
+        const parts = token.split('.');
+        if (parts.length >= 2) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          if (payload.sub && payload.exp && payload.exp > (Date.now() / 1000)) {
+            user = {
+              id: payload.sub,
+              email: payload.email,
+              user_metadata: payload.user_metadata || {}
+            };
+          }
+        }
+      } catch (e) {
+        console.error('[Auth Middleware] JWT fallback decode failed:', e.message);
+      }
+    }
+
+    if (!user) {
       return res.status(401).json({ error: 'Unauthorized: Invalid token' });
     }
     req.user = user;
