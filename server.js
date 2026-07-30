@@ -590,29 +590,57 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const displayName = googleUser.name || googleUser.email.split('@')[0];
     const avatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${googleUser.id}`;
 
-    // Link to existing user profile in Aiven DB (prioritize Dr RDM or matching display_name)
+    // Universal 4-Tier profile matching strategy for all existing Aiven DB users:
     try {
-      const cleanName = (googleUser.name || '').split('(')[0].trim();
-      const { data: drRdmProfile } = await supabase
+      const emailPrefix = googleUser.email ? googleUser.email.split('@')[0].trim() : '';
+      const fullName = (googleUser.name || '').trim();
+      const cleanName = fullName.split('(')[0].trim();
+      const firstName = cleanName.split(' ')[0].trim();
+
+      // 1. Exact match (by full name, clean name, or email prefix)
+      let match = null;
+      const { data: exactMatch } = await supabase
         .from('profiles')
         .select('user_id')
-        .eq('display_name', 'Dr RDM')
+        .or(`display_name.eq."${fullName}",display_name.eq."${cleanName}",display_name.eq."${emailPrefix}"`)
         .limit(1)
         .maybeSingle();
-      if (drRdmProfile && drRdmProfile.user_id) {
-        userId = drRdmProfile.user_id;
-      } else {
-        const { data: existingProfile } = await supabase
+      if (exactMatch && exactMatch.user_id) {
+        match = exactMatch;
+      }
+
+      // 2. Fuzzy match by clean name or email prefix (case insensitive)
+      if (!match && cleanName.length >= 3) {
+        const { data: fuzzyMatch } = await supabase
           .from('profiles')
           .select('user_id')
-          .or(`display_name.eq."${displayName}",display_name.ilike."${cleanName}%"`)
+          .or(`display_name.ilike."%${cleanName}%",display_name.ilike."%${emailPrefix}%"`)
           .limit(1)
           .maybeSingle();
-        if (existingProfile && existingProfile.user_id) {
-          userId = existingProfile.user_id;
+        if (fuzzyMatch && fuzzyMatch.user_id) {
+          match = fuzzyMatch;
         }
       }
-    } catch (_) {}
+
+      // 3. First name match (for nicknames or handles)
+      if (!match && firstName.length >= 3) {
+        const { data: fnMatch } = await supabase
+          .from('profiles')
+          .select('user_id')
+          .ilike('display_name', `%${firstName}%`)
+          .limit(1)
+          .maybeSingle();
+        if (fnMatch && fnMatch.user_id) {
+          match = fnMatch;
+        }
+      }
+
+      if (match && match.user_id) {
+        userId = match.user_id;
+      }
+    } catch (matchErr) {
+      console.error('[Google OAuth User Link Error]:', matchErr.message);
+    }
 
     // Upsert into Aiven PostgreSQL profiles (only valid columns: user_id, display_name, avatar_url)
     try {
