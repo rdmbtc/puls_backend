@@ -537,6 +537,85 @@ const supabaseAnon = createClient(
 
 const USDC = '0x3600000000000000000000000000000000000000';
 
+// ── DIRECT GOOGLE OAUTH (Bypassing Supabase Egress Restriction) ────────────
+app.get('/api/auth/google', (req, res) => {
+  const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+  if (!clientId) {
+    return res.status(400).send('GOOGLE_CLIENT_ID is not configured on server.');
+  }
+  const redirectUri = encodeURIComponent('https://api.pulsmarket.tech/api/auth/google/callback');
+  const scope = encodeURIComponent('openid email profile');
+  const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&prompt=select_account`;
+  res.redirect(googleAuthUrl);
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) {
+    return res.redirect('https://app.pulsmarket.tech/?error=missing_code');
+  }
+  try {
+    const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+    const clientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+    const redirectUri = 'https://api.pulsmarket.tech/api/auth/google/callback';
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code'
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.error('[Google OAuth] Token exchange error:', tokenData);
+      return res.redirect('https://app.pulsmarket.tech/?error=oauth_failed');
+    }
+
+    const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const googleUser = await userRes.json();
+    if (!googleUser.id || !googleUser.email) {
+      return res.redirect('https://app.pulsmarket.tech/?error=invalid_user_data');
+    }
+
+    const userId = `google_${googleUser.id}`;
+    const displayName = googleUser.name || googleUser.email.split('@')[0];
+    const avatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${googleUser.id}`;
+
+    // Upsert into Aiven PostgreSQL profiles
+    try {
+      await supabase.from('profiles').upsert({
+        user_id: userId,
+        display_name: displayName,
+        avatar_url: avatarUrl,
+        email: googleUser.email
+      }, { onConflict: 'user_id' });
+    } catch (dbErr) {
+      console.error('[Google OAuth DB Upsert Warning]:', dbErr.message);
+    }
+
+    const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const jwtPayload = Buffer.from(JSON.stringify({
+      sub: googleUser.id,
+      email: googleUser.email,
+      user_metadata: { full_name: displayName, avatar_url: avatarUrl },
+      exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600)
+    })).toString('base64url');
+    const token = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
+
+    res.redirect(`https://app.pulsmarket.tech/?auth_token=${token}&user_id=${userId}`);
+  } catch (err) {
+    console.error('[Google OAuth Error]:', err.message);
+    res.redirect('https://app.pulsmarket.tech/?error=auth_error');
+  }
+});
+
 //  Circle API Circuit Breaker 
 // After 5 consecutive failures, stops calling Circle for 60s to avoid
 // cascading rate-limit / outage spirals. Resets on any success.
