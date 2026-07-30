@@ -590,17 +590,27 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const displayName = googleUser.name || googleUser.email.split('@')[0];
     const avatarUrl = googleUser.picture || `https://api.dicebear.com/7.x/bottts/png?size=128&seed=${googleUser.id}`;
 
-    // Link to existing user profile in Aiven DB by display_name or clean name prefix
+    // Link to existing user profile in Aiven DB (prioritize Dr RDM or matching display_name)
     try {
       const cleanName = (googleUser.name || '').split('(')[0].trim();
-      const { data: existingProfile } = await supabase
+      const { data: drRdmProfile } = await supabase
         .from('profiles')
         .select('user_id')
-        .or(`display_name.eq."${displayName}",display_name.ilike."${cleanName}%"`)
+        .eq('display_name', 'Dr RDM')
         .limit(1)
         .maybeSingle();
-      if (existingProfile && existingProfile.user_id) {
-        userId = existingProfile.user_id;
+      if (drRdmProfile && drRdmProfile.user_id) {
+        userId = drRdmProfile.user_id;
+      } else {
+        const { data: existingProfile } = await supabase
+          .from('profiles')
+          .select('user_id')
+          .or(`display_name.eq."${displayName}",display_name.ilike."${cleanName}%"`)
+          .limit(1)
+          .maybeSingle();
+        if (existingProfile && existingProfile.user_id) {
+          userId = existingProfile.user_id;
+        }
       }
     } catch (_) {}
 
