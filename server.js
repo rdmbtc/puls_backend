@@ -14,7 +14,7 @@ import { rateLimit } from 'express-rate-limit';
 import { createClient } from '@supabase/supabase-js';
 import { createNeonClient } from './lib/neon_supabase_adapter.js';
 import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
-import { createPublicClient, createWalletClient, http, decodeEventLog, keccak256, toHex, parseAbiItem, encodeFunctionData, stringToHex } from 'viem';
+import { createPublicClient, createWalletClient, http, fallback, decodeEventLog, keccak256, toHex, parseAbiItem, encodeFunctionData, stringToHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arcTestnet } from 'viem/chains';
 import { x402Paywall, x402Info } from './lib/x402.js';
@@ -749,9 +749,22 @@ const WALLET_ACCOUNT_TYPE = (process.env.WALLET_ACCOUNT_TYPE || 'SCA').trim().to
 console.log(`[Wallets] New user wallets will be created as ${WALLET_ACCOUNT_TYPE}${WALLET_ACCOUNT_TYPE === 'SCA' ? ' (gasless via Circle Gas Station)' : ' (legacy, requires gas funding)'}`);
 
 const rpcUrl = (process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
+const publicRpcUrl = (process.env.ARC_PUBLIC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
+// Primary (private) node first, public node as failover: the private node is
+// nginx rate-limited (429s) and occasionally blips with HTML error pages,
+// which used to break balance reads and the RPC proxy with 502s.
+const rpcTransport = rpcUrl === publicRpcUrl
+  ? http(rpcUrl, { timeout: 10000 })
+  : fallback(
+      [
+        http(rpcUrl, { timeout: 10000 }),
+        http(publicRpcUrl, { timeout: 10000 }),
+      ],
+      { rank: false, retryCount: 1 }
+    );
 const publicClient = createPublicClient({
   chain: arcTestnet,
-  transport: http(rpcUrl)
+  transport: rpcTransport
 });
 
 const adminPrivateKey = process.env.PRIVATE_KEY ? process.env.PRIVATE_KEY.trim() : null;
@@ -1784,10 +1797,11 @@ const rpcProxyLimiter = rateLimit({
 
 // POST /api/rpc-proxy
 app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
-    // 8s timeout for upstream RPC (Heroku 30s limit, leave headroom)
+    // Primary (private) node first, public node as failover: the private node
+    // is nginx rate-limited (429 HTML pages), which used to surface as 502s.
+    const rpcUrls = [rpcUrl, publicRpcUrl].filter((u, i, a) => u && a.indexOf(u) === i);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
-    const rpcUrl = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network';
+    const timeoutId = setTimeout(() => controller.abort(), rpcUrls.length * 8000);
     try {
       const { method, params, id, jsonrpc } = req.body;
       if (!method) {
@@ -1810,45 +1824,37 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
       }
     }
 
-    const response = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        method,
-        params,
-        id: id || 1,
-        jsonrpc: jsonrpc || '2.0',
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    let data;
-    try {
-      const text = await response.text();
-      data = JSON.parse(text);
-    } catch (parseErr) {
-      // The node occasionally blips with a non-JSON body (HTML error page /
-      // empty reply). Retry once before surfacing a 502 to the client.
-      console.warn('[RPC Proxy] Non-JSON response from upstream RPC, retrying:', parseErr.message);
+    const rpcBody = JSON.stringify({ method, params, id: id || 1, jsonrpc: jsonrpc || '2.0' });
+    let data = null;
+    for (const url of rpcUrls) {
       try {
-        const retry = await fetch(rpcUrl, {
+        const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            method,
-            params,
-            id: id || 1,
-            jsonrpc: jsonrpc || '2.0',
-          }),
+          body: rpcBody,
           signal: controller.signal,
         });
-        const retryText = await retry.text();
-        data = JSON.parse(retryText);
-      } catch (retryErr) {
-        console.warn('[RPC Proxy] Retry also failed:', retryErr.message);
-        return res.status(502).json({ jsonrpc: '2.0', id: id || 1, error: { code: -32603, message: 'Upstream RPC node returned non-JSON' } });
+        const text = await response.text();
+        // Rate-limited (429) or non-JSON body (HTML error page / empty reply):
+        // move to the next node before surfacing anything to the client.
+        if (response.status === 429 || !response.ok && response.status >= 500) {
+          console.warn(`[RPC Proxy] Node ${url} responded ${response.status}, trying next`);
+          continue;
+        }
+        try {
+          data = JSON.parse(text);
+          break;
+        } catch (parseErr) {
+          console.warn(`[RPC Proxy] Non-JSON response from ${url}, trying next:`, parseErr.message);
+        }
+      } catch (fetchErr) {
+        console.warn(`[RPC Proxy] Fetch to ${url} failed, trying next:`, fetchErr.message);
       }
+    }
+    clearTimeout(timeoutId);
+
+    if (!data) {
+      return res.status(502).json({ jsonrpc: '2.0', id: id || 1, error: { code: -32603, message: 'Upstream RPC nodes unavailable' } });
     }
 
     if (isCacheable && data && !data.error) {
@@ -2879,7 +2885,9 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
       { name: '_y', type: 'uint256' }, { name: '_n', type: 'uint256' } ] }];
 
     const claimed = [];
+    const claimDeadline = Date.now() + 22000; // keep under Heroku's 30s limit
     for (const m of markets) {
+      if (Date.now() > claimDeadline) break; // return partial results instead of H12
       for (const wallet of wallets) {
         try {
           const [pos, info] = await Promise.all([
