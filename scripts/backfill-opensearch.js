@@ -14,11 +14,11 @@ if (!osClient) {
 }
 
 let supabase = null;
-if (supabaseUrl && supabaseKey) {
-  supabase = createClient(supabaseUrl, supabaseKey);
-} else if (dbUrl) {
-  console.log('[backfill] using Neon database adapter');
+if (dbUrl) {
+  console.log('[backfill] using Neon database adapter (Aiven)');
   supabase = createNeonClient(dbUrl);
+} else if (supabaseUrl && supabaseKey) {
+  supabase = createClient(supabaseUrl, supabaseKey);
 } else {
   console.error('[backfill] Neither SUPABASE_URL nor DATABASE_URL is set. Exiting.');
   process.exit(1);
