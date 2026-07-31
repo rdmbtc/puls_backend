@@ -5206,7 +5206,8 @@ async function updateLeaderboard() {
                     ]
                   }],
                   functionName: 'getMarketInfo'
-                });
+    });
+
                 
                 const poolYes = Number(yesOutstanding) / 1_000_000;
                 const poolNo = Number(noOutstanding) / 1_000_000;
@@ -6583,6 +6584,26 @@ Output ONLY the JSON object.`;
       }
       return a;
     });
+
+    // Redirect rule: if the user asked to stake on a signal ("buy the F1 signal
+    // and put $2 on it") but the LLM put the amount on its OWN market pick
+    // (a stray buy on an unrelated feed market) instead of tradeUsdc on the
+    // buy_signal action, move that amount onto the signal action — the stake
+    // must land on the SIGNAL's market with the signal's stance, never on a
+    // market the signal doesn't reference. Only kept if the user themselves
+    // named that market.
+    const signalActs = actions.filter((a) => a.type === 'buy_signal');
+    const unstakedSignal = signalActs.find((a) => !(parseFloat(a.tradeUsdc ?? a.stakeUsdc ?? 0) > 0));
+    const strayIdx = actions.findIndex((a) => (a.type === 'buy' || !a.type) && (parseFloat(a.usdc ?? a.usdcAmount ?? 0) > 0));
+    if (unstakedSignal && strayIdx >= 0) {
+      const stray = actions[strayIdx];
+      const strayQ = String(stray.market || stray.slug || stray.query || '');
+      const userNamed = strayQ && String(message || '').toLowerCase().includes(strayQ.slice(0, 40).toLowerCase());
+      if (!userNamed) {
+        unstakedSignal.tradeUsdc = parseFloat(stray.usdc ?? stray.usdcAmount);
+        actions.splice(strayIdx, 1);
+      }
+    }
 
     // Execute each action within the on-chain budget; aggregate the results.
     const trades = [];
