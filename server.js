@@ -45,7 +45,7 @@ import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
 import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
 import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
-import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, osClient } from './lib/opensearch.js';
+import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, searchSignalMarket, osClient } from './lib/opensearch.js';
 import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware } from './lib/redis.js';
 
 // Auto-index events via eventBus
@@ -6239,6 +6239,30 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
 // real USDC nanopayment from its OWN wallet (agentcreator x402 on Arc) and
 // returns the thesis. Picks the best buyable signal (most-unlocked, freshest);
 // skips its own, already-bought, over-budget, and resolved-market (stale) ones.
+// Verify a candidate market is REALLY the market a signal references. The
+// agent's stake must never land on a different market than the signal's own
+// pick — wrong fuzzy resolutions are rejected here (exact slug match, or >=60%
+// of the signal's significant question/slug tokens present in the market).
+function signalMarketMatches(m, signal) {
+  if (!m) return false;
+  const slug = String(signal.market_slug || '').trim();
+  const question = String(signal.market_question || '').trim();
+  if (!slug && !question) return false;
+  const mQ = _normQ(m.question || m.slug || '');
+  if (slug) {
+    if (String(m.slug || '').toLowerCase() === slug.toLowerCase()) return true;
+    const sTokens = _normQ(slug).split(' ').filter((w) => w.length > 2);
+    const hit = sTokens.filter((w) => mQ.includes(w)).length;
+    if (sTokens.length && hit / sTokens.length >= 0.6) return true;
+  }
+  if (question) {
+    const qTokens = _normQ(question).split(' ').filter((w) => w.length > 2);
+    const hit = qTokens.filter((w) => mQ.includes(w)).length;
+    if (qTokens.length && hit / qTokens.length >= 0.6) return true;
+  }
+  return false;
+}
+
 async function buySignalForUserAgent(userId, agent, query) {
   const agentUserId = `agent_${userId}`;
   const remaining = parseFloat(agent.balance) || 0;
@@ -6628,6 +6652,33 @@ Output ONLY the JSON object.`;
           if (_stake > 0 && _sigRef && budgetLeft >= _stake - 1e-9) {
             const _sigSide = String(r.signal.stance || '').toUpperCase() === 'NO' ? 'NO' : 'YES';
             let _sm = resolvePositionalMarket(_sigRef, '', feed) || await resolveMarketByName(_sigRef, feed);
+            // HARD GUARD: the stake must land ONLY on the market the signal
+            // references. If resolution returned something else, reject it.
+            if (_sm && !signalMarketMatches(_sm, r.signal)) _sm = null;
+            // RAG fallback: semantically find the signal's OWN market by its
+            // question (never substitute a different market in its place).
+            if (!_sm) {
+              try {
+                const _ragQ = r.signal.market_question || _sigRef || r.signal.thesis || '';
+                if (_ragQ) {
+                  const _ragHits = await searchSignalMarket({ question: _ragQ, slug: r.signal.market_slug });
+                  const _ragGood = (Array.isArray(_ragHits) ? _ragHits : []).find((h) => h.slug && signalMarketMatches(h, r.signal));
+                  if (_ragGood) {
+                    let _ragDeadline = _ragGood.deadline ? Math.floor(new Date(_ragGood.deadline).getTime() / 1000) : 0;
+                    const _ragCached = deployedMarketsCache.get(_ragGood.slug);
+                    if (_ragCached) _ragDeadline = Math.max(_ragDeadline, Number(_ragCached.deadline) || 0);
+                    if (_ragDeadline > Math.floor(Date.now() / 1000) + 300) {
+                      const _ragAddr = await getOrDeployMarket(_ragGood.slug, _ragDeadline);
+                      if (_ragAddr) _sm = { slug: _ragGood.slug, question: _ragGood.question || _ragGood.slug, deployed: true };
+                    } else if (_ragCached) {
+                      _sm = { slug: _ragGood.slug, question: _ragGood.question || _ragGood.slug, deadline: _ragDeadline };
+                    }
+                  }
+                }
+              } catch (_ragErr) {
+                console.warn(`[agent/chat] RAG signal-market lookup failed:`, _ragErr.message);
+              }
+            }
             // If market not in feed/cache, try to deploy it on-demand from Polymarket
             if (!_sm) {
               try {
