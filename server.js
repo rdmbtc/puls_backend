@@ -1814,8 +1814,27 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
       const text = await response.text();
       data = JSON.parse(text);
     } catch (parseErr) {
-      console.warn('[RPC Proxy] Non-JSON response from upstream RPC:', parseErr.message);
-      return res.status(502).json({ jsonrpc: '2.0', id: id || 1, error: { code: -32603, message: 'Upstream RPC node returned non-JSON' } });
+      // The node occasionally blips with a non-JSON body (HTML error page /
+      // empty reply). Retry once before surfacing a 502 to the client.
+      console.warn('[RPC Proxy] Non-JSON response from upstream RPC, retrying:', parseErr.message);
+      try {
+        const retry = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method,
+            params,
+            id: id || 1,
+            jsonrpc: jsonrpc || '2.0',
+          }),
+          signal: controller.signal,
+        });
+        const retryText = await retry.text();
+        data = JSON.parse(retryText);
+      } catch (retryErr) {
+        console.warn('[RPC Proxy] Retry also failed:', retryErr.message);
+        return res.status(502).json({ jsonrpc: '2.0', id: id || 1, error: { code: -32603, message: 'Upstream RPC node returned non-JSON' } });
+      }
     }
 
     if (isCacheable && data && !data.error) {
@@ -6252,8 +6271,15 @@ async function buySignalForUserAgent(userId, agent, query) {
   if (!cand.length) return { ok: false, reason: 'No buyable signals right now  all already bought, over my budget, or their markets have resolved.' };
   const q = String(query || '').trim().toLowerCase();
   if (q && !['top', 'best', 'any', 'a', 'the', 'one', 'signal', 'alpha', 'forecast'].includes(q)) {
-    const matched = cand.filter((r) => `${r.title} ${r.market_question || ''}`.toLowerCase().includes(q));
-    if (matched.length) cand = matched;
+    // Prefer an exact market_question match (uniquely identifies a signal when
+    // several share one title, e.g. per-driver "F1 Drivers' Champion" calls);
+    // fall back to a title+question substring match.
+    const byQuestion = cand.filter((r) => `${r.market_question || ''}`.toLowerCase().includes(q));
+    if (byQuestion.length) cand = byQuestion;
+    else {
+      const matched = cand.filter((r) => `${r.title} ${r.market_question || ''}`.toLowerCase().includes(q));
+      if (matched.length) cand = matched;
+    }
   }
   cand.sort((a, b) => (b.unlocks_count ?? 0) - (a.unlocks_count ?? 0)
     || (new Date(b.created_at) - new Date(a.created_at)));
@@ -6474,13 +6500,16 @@ async function resolveMarketByName(name, feed) {
     try {
       const { data: sigRows } = await supabase
         .from('creator_signals')
-        .select('id, title, stance, price_usdc')
+        .select('id, title, market_question, stance, price_usdc')
         .eq('status', 'published')
         .neq('creator_user_id', `agent_${userId}`)
         .order('created_at', { ascending: false })
         .limit(5);
       if (sigRows && sigRows.length) {
-        signalMenu = sigRows.map((s, i) => `${i + 1}. "${s.title}"${s.stance ? ` (${s.stance})` : ''}  ${s.price_usdc} USDC`).join('\n');
+        // Show the exact market question so the LLM/user can target the right
+        // one  several signals can share one title (e.g. "F1 Drivers' Champion"
+        // exists per driver with different stances).
+        signalMenu = sigRows.map((s, i) => `${i + 1}. "${s.title}"${s.stance ? ` (${s.stance})` : ''} — ${s.market_question || 'no question listed'} — ${s.price_usdc} USDC`).join('\n');
       }
     } catch (e) {
       console.warn('[agent/chat] signal menu fetch error:', e.message);
@@ -6512,6 +6541,8 @@ Each action is exactly one of:
 Rules:
 - "top market" / "best one" / "first" / "#1" ALWAYS means market #1 in the numbered list above. For a signal, "top signal"/"best signal" means use query "top".
 - If the user wants to buy a signal AND bet/stake on its pick (e.g. "buy the top signal and put $2 on it", "buy $2 into its market"), return ONE buy_signal action with tradeUsdc set to the stake  NOT a separate buy (you don't know the signal's market until it's bought; I reveal it and place the trade on the signal's side).
+- When you set tradeUsdc on a buy_signal, do NOT emit any buy actions for other markets in the same response  the stake on the signal's market IS the trade. Only emit separate buy actions if the user explicitly named those markets.
+- Signals can share a title but have different markets and stances (e.g. multiple "F1 Drivers' Champion" signals, one per driver). To target a specific one, set query to the market question or driver name ("leclerc f1")  "top"/"best" always means the most-unlocked signal.
 - If the user asks to buy SEVERAL markets in one message, return one "buy" action per market, each with its amount.
 - "market" may be ANY real prediction market the user names (e.g. "Will Spain reach the Round of 16 at the 2026 FIFA World Cup?", "Will BTC close above $100k by 2026-12-31"). Honor the amounts they give.
 - Decide YES/NO from your reasoning + the research (and any signal the user told you to act on).
@@ -6559,6 +6590,7 @@ Output ONLY the JSON object.`;
     const notes = [];
     let spentNow = 0;
     let budgetLeft = remaining;
+    let signalStakedSlug = null; // market the agent staked on via a bought signal
     for (const act of actions.slice(0, 6)) {
       const type = act.type || 'buy';
       if (type === 'buy_signal') {
@@ -6598,7 +6630,7 @@ Output ONLY the JSON object.`;
             }
             if (_sm) {
               const _tr = await execAgentTrade(userId, agent, _sm, _sigSide, _stake);
-              if (_tr.ok) { spentNow += _stake; budgetLeft -= _stake; trades.push(_tr.trade); notes.push(` acted on it  ${_sigSide} $${_stake} on "${_sm.question || _sm.slug}"`); }
+              if (_tr.ok) { spentNow += _stake; budgetLeft -= _stake; signalStakedSlug = _sm.slug; trades.push(_tr.trade); notes.push(` acted on it  ${_sigSide} $${_stake} on "${_sm.question || _sm.slug}"`); }
               else notes.push(` bought the signal but couldn't stake on its market  ${_tr.error}`);
             } else notes.push(` bought the signal; couldn't locate its market to stake $${_stake}`);
           }
@@ -6615,6 +6647,18 @@ Output ONLY the JSON object.`;
         let market = resolvePositionalMarket(ref, message, feed);
         if (!market) market = await resolveMarketByName(ref, feed);
         if (!market) { notes.push(` couldn't find a market matching "${ref}"`); continue; }
+        // Once the agent staked on a bought signal's market, drop any other
+        // autonomous market picks in the SAME response — the stake on the
+        // signal IS the trade. Only keep buys the user explicitly named.
+        if (signalStakedSlug && market.slug !== signalStakedSlug) {
+          // Only the USER's message counts — the action ref is LLM-generated,
+          // so it must not make this look user-requested.
+          const mentioned = String(message || '').toLowerCase().includes(String(market.question || market.slug).slice(0, 40).toLowerCase());
+          if (!mentioned) {
+            notes.push(` skipped my own pick "${market.question || market.slug}" — my stake is on the bought signal's market`);
+            continue;
+          }
+        }
         const r = await execAgentTrade(userId, agent, market, side, amount);
         if (r.ok) { spentNow += amount; budgetLeft -= amount; trades.push(r.trade); notes.push(` ${side} $${amount}  ${market.question || market.slug}`); }
         else notes.push(` "${market.question || market.slug}": ${r.error}`);
