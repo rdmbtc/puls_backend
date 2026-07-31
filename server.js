@@ -45,8 +45,8 @@ import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
 import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
 import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
-import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, searchSignalMarket, osClient } from './lib/opensearch.js';
-import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware } from './lib/redis.js';
+import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, searchSignalMarket, osClient, pingOpenSearch, getOpenSearchStats, scheduleMarketRefresh } from './lib/opensearch.js';
+import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware, createValkeyRateLimitStore, redisPing, getRedisStats, shutdownRedis } from './lib/redis.js';
 
 // Auto-index events via eventBus
 if (osClient) {
@@ -58,6 +58,12 @@ if (osClient) {
   });
   eventBus.on(EVENTS.SIGNAL_PUBLISHED, (sig) => {
     if (sig) indexSignal(sig).catch(() => {});
+  });
+  // Trades move volume/prices — refresh the market doc shortly after activity
+  // (debounced in lib/opensearch.js so bursts coalesce into one request).
+  eventBus.on(EVENTS.TRADE_COMPLETE, (t) => {
+    const slug = t?.market_id || t?.slug;
+    if (slug) scheduleMarketRefresh(slug, () => cache.marketBySlug(slug));
   });
 }
 
@@ -105,12 +111,17 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Real rate limiters (previously no-ops). Tune via env if needed.
+// When Valkey is configured the counters live in Valkey (shared across dynos,
+// survives restarts); otherwise express-rate-limit uses its in-memory store.
+const valkeyRateLimitStore = createValkeyRateLimitStore(60 * 1000);
+const rateLimitStoreOpts = valkeyRateLimitStore ? { store: valkeyRateLimitStore } : {};
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_GENERAL || '300', 10),
   message: { error: 'Too many requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...rateLimitStoreOpts,
 });
 const strictLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -118,6 +129,7 @@ const strictLimiter = rateLimit({
   message: { error: 'Too many requests for this action. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...rateLimitStoreOpts,
 });
 // Trading endpoints get a much more generous limit so rapid/fast-buy flows
 // are never blocked at current traffic levels (600/min per IP by default).
@@ -128,6 +140,7 @@ const tradeLimiter = rateLimit({
   message: { error: 'Too many trade requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...rateLimitStoreOpts,
 });
 const activateMarketLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -135,6 +148,7 @@ const activateMarketLimiter = rateLimit({
   message: { error: 'Too many market activations. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...rateLimitStoreOpts,
 });
 
 const app = express();
@@ -2231,7 +2245,7 @@ ${urls}
   }
 });
 
-app.get('/api/markets', async (req, res) => {
+app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
   try {
     const limit = req.query.limit || 50;
     const offset = req.query.offset || 0;
@@ -3559,7 +3573,7 @@ let statsCache = { data: null, ts: 0 };
 const STATS_TTL_MS = 60 * 1000;
 
 // GET /api/stats  public protocol-level numbers for the landing page
-app.get('/api/stats', async (req, res) => {
+app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
   try {
     if (statsCache.data && Date.now() - statsCache.ts < STATS_TTL_MS) {
       return res.json(statsCache.data);
@@ -5357,7 +5371,7 @@ app.get('/api/refresh-leaderboard', async (req, res) => {
 const leaderboardCache = new Map(); // key: "sort:limit"  { data, ts }
 const LEADERBOARD_CACHE_TTL = 60_000; // 60 seconds
 
-app.get('/api/leaderboard', async (req, res) => {
+app.get('/api/leaderboard', cacheMiddleware(60, 'v1'), async (req, res) => {
   try {
     const { sort = 'pnl', limit = 50, type = 'all' } = req.query;
     const maxLimit = Math.min(500, parseInt(limit) || 50);
@@ -7573,11 +7587,26 @@ app.get('/api/search', async (req, res) => {
 });
 
 // Valkey/Redis Status & Cache Health
-app.get('/api/redis/status', (req, res) => {
+app.get('/api/redis/status', async (req, res) => {
+  const [ping, stats] = await Promise.all([redisPing(), getRedisStats()]);
   res.json({
     enabled: Boolean(redisClient),
     status: redisClient ? redisClient.status : 'disabled',
-    provider: 'Aiven Valkey / Redis',
+    provider: 'Aiven Valkey',
+    ping,
+    stats,
+    rateLimitStore: Boolean(valkeyRateLimitStore),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// OpenSearch Status & Index Health
+app.get('/api/opensearch/status', async (req, res) => {
+  const [health, indices] = await Promise.all([pingOpenSearch(), getOpenSearchStats()]);
+  res.json({
+    enabled: Boolean(osClient),
+    health,
+    indices,
     timestamp: new Date().toISOString()
   });
 });
@@ -9270,6 +9299,8 @@ const swarm = registerSwarm(app, {
 if (typeof swarm.start === 'function') {
   setTimeout(() => swarm.start(), 5 * 1000);
   if (typeof swarm.stop === 'function') onShutdown(() => swarm.stop());
+  onShutdown(() => shutdownRedis());
+  onShutdown(() => osClient?.close?.());
 }
 
 // Autonomous streaming agent: a trader agent
