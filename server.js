@@ -1769,7 +1769,7 @@ async function getWalletInfo(walletId) {
 
 // In-memory RPC cache  bounded with TTL eviction to prevent OOM on 512MB dynos.
 const rpcCache = new Map(); // requestHash -> { data, ts }
-const RPC_CACHE_TTL = 3000; // 3 seconds TTL
+const RPC_CACHE_TTL = 10000; // 10 seconds TTL: balances are stable, nodes rate-limit heavily
 const RPC_CACHE_MAX = 2000; // hard cap: evict oldest when exceeded
 
 // Allowed RPC methods to prevent open relay abuse
@@ -2028,6 +2028,15 @@ app.get('/api/wallet/balance', apiKeyOrAuth, async (req, res) => {
     }
 
     if (userAddress) {
+      // Cache external-wallet balances in Valkey: eth_call against the
+      // rate-limited Arc nodes is the hot path (30s refresh per session).
+      const cacheKey = `v1:usdc-balance:${userAddress.toLowerCase()}`;
+      try {
+        const cached = await cacheGet(cacheKey);
+        if (cached && typeof cached.usdcBalance === 'string') {
+          return res.json(cached);
+        }
+      } catch (_) {}
       let balance = '0.00';
       try {
         const balanceRaw = await publicClient.readContract({
@@ -2043,6 +2052,7 @@ app.get('/api/wallet/balance', apiKeyOrAuth, async (req, res) => {
           args: [userAddress]
         });
         balance = (Number(balanceRaw) / 1_000_000).toFixed(2);
+        cacheSet(cacheKey, { usdcBalance: balance }, 15).catch(() => {});
       } catch (err) {
         console.warn(`On-chain balance check failed for external wallet ${userAddress}:`, err.message);
       }
