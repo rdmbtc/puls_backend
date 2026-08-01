@@ -669,11 +669,73 @@ app.get('/api/auth/google/callback', async (req, res) => {
       })).toString('base64url');
       const token = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
 
-    res.redirect(`https://app.pulsmarket.tech/?auth_token=${token}&user_id=${userId}`);
+    // One-time handoff via HttpOnly cookie on .pulsmarket.tech, then redirect
+    // to a clean URL. Keeps the JWT out of the query string where edge
+    // firewalls (Vercel) can 403 the page before Flutter even starts.
+    res.cookie(PULS_COOKIE, `${userId}|${token}`, pulsCookieOpts);
+    res.redirect('https://app.pulsmarket.tech/');
   } catch (err) {
     console.error('[Google OAuth Error]:', err.message);
     res.redirect('https://app.pulsmarket.tech/?error=auth_error');
   }
+});
+
+//  One-time OAuth handoff cookie: the Google callback sets puls_session on
+//  .pulsmarket.tech (HttpOnly, 5 min) and redirects to a clean app URL — no
+//  auth token in the query string (Vercel's edge firewall can 403 URLs that
+//  carry token-looking query params). The app claims it once via
+//  GET /api/auth/session, which validates and clears it.
+const PULS_COOKIE = 'puls_session';
+const pulsCookieOpts = {
+  domain: '.pulsmarket.tech',
+  path: '/',
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax',
+  maxAge: 5 * 60 * 1000, // 5 min — one-time handoff, then cleared
+};
+const pulsClearCookieOpts = { ...pulsCookieOpts, maxAge: 0 };
+function pulsSessionCookie(req) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== PULS_COOKIE) continue;
+    try { return decodeURIComponent(part.slice(eq + 1).trim()); } catch (_) { return null; }
+  }
+  return null;
+}
+
+//  Claim the one-time OAuth handoff cookie set by /api/auth/google/callback.
+//  Returns { userId, token } and clears the cookie so it can't be replayed.
+app.get('/api/auth/session', async (req, res) => {
+  const raw = pulsSessionCookie(req);
+  if (!raw) return res.status(404).json({ error: 'no_session' });
+  const clearAnd = (code, msg) => {
+    res.clearCookie(PULS_COOKIE, pulsClearCookieOpts);
+    return res.status(code).json({ error: msg });
+  };
+  const bar = raw.indexOf('|');
+  if (bar < 0) return clearAnd(401, 'invalid_session');
+  const userId = raw.slice(0, bar);
+  const token = raw.slice(bar + 1);
+  const parts = token.split('.');
+  if (parts.length < 3 || parts[2] !== 'signed_puls_direct') {
+    return clearAnd(401, 'invalid_session');
+  }
+  let payload;
+  try { payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8')); } catch (_) {
+    return clearAnd(401, 'invalid_session');
+  }
+  if (!payload.sub || payload.sub !== userId) return clearAnd(401, 'invalid_session');
+  if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
+    return clearAnd(401, 'session_expired');
+  }
+  const { data: profile } = await supabase
+    .from('profiles').select('user_id').eq('user_id', userId).maybeSingle();
+  if (!profile) return clearAnd(401, 'user_not_found');
+  res.clearCookie(PULS_COOKIE, pulsClearCookieOpts);
+  res.json({ userId, token, email: payload.email || '' });
 });
 
 //  Direct-auth token refresh (no full OAuth redirect needed).
