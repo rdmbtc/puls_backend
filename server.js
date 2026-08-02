@@ -38,6 +38,7 @@ import { registerAgentPnl } from './lib/agent_pnl.js';
 import { registerLepton } from './lib/lepton.js';
 import { registerX402Markets } from './lib/x402_markets.js';
 import { registerBazaar } from './lib/bazaar.js';
+import { registerInvest } from './lib/invest.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
@@ -4215,6 +4216,17 @@ registerX402Markets(app, {
 registerAgentPnl(app, {
   supabase,
   circle,
+});
+
+//  Puls Invest  real USDC sponsorship of AI agents via x402 
+// Pick an agent → pay USDC through Circle Gateway to the treasury → own a
+// pro-rata share of the agent's capital pool → withdraw claimable anytime.
+registerInvest(app, {
+  supabase,
+  publicClient,
+  walletClient,
+  adminAccount,
+  auth: apiKeyOrAuth,
 });
 
 // /health  quick liveness probe (returns 200 immediately). Use for
