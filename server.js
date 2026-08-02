@@ -1851,6 +1851,7 @@ const ALLOWED_RPC_METHODS = [
   'eth_gasPrice',
   'eth_getTransactionByHash',
   'eth_getTransactionReceipt',
+  'eth_getTransactionCount',
   'eth_chainId',
   'net_version'
 ];
