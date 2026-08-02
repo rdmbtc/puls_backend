@@ -4227,6 +4227,12 @@ registerInvest(app, {
   walletClient,
   adminAccount,
   auth: apiKeyOrAuth,
+  circle,
+  getWalletId,
+  getWalletInfo,
+  authenticateUser,
+  requireVerifiedUser,
+  strictLimiter,
 });
 
 // /health  quick liveness probe (returns 200 immediately). Use for
