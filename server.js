@@ -241,6 +241,10 @@ app.use(cors({
     return callback(null, true);
   },
   credentials: true,
+  // Expose x402 payment headers so browser clients (Vercel web app, Flutter
+  // Web) can read PAYMENT-REQUIRED from the 402. Without Access-Control-Expose-
+  // Headers browsers hide non-safelisted response headers from JS.
+  exposedHeaders: ['PAYMENT-REQUIRED'],
 }));
 // Capture the raw request body so we can verify Circle's ECDSA webhook
 // signature over the exact bytes Circle signed (re-serializing the parsed JSON
