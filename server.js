@@ -36,6 +36,8 @@ import { registerSwarm, buildSwarmRoster } from './lib/agent_swarm.js';
 import { registerAgentDuel } from './lib/agent_duel.js';
 import { registerAgentPnl } from './lib/agent_pnl.js';
 import { registerLepton } from './lib/lepton.js';
+import { registerX402Markets } from './lib/x402_markets.js';
+import { registerBazaar } from './lib/bazaar.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
@@ -4195,6 +4197,16 @@ registerLepton(app, {
   researchQuestion,
   llmComplete,
   formatForApp,
+});
+
+//  x402 Bazaar  the first x402 discovery registry on Arc Testnet 
+// Public catalog + hybrid search of paid endpoints, each paying via Circle
+// Gateway. Discovery is free; the data behind each service is paid.
+registerBazaar(app);
+
+//  x402 Markets  buy a live market-data snapshot for $0.01 
+registerX402Markets(app, {
+  fetchGamma,
 });
 
 //  Agent P&L  verifiable per-agent unit economics 
