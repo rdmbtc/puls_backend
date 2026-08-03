@@ -5,48 +5,46 @@ const pool = new pg.Pool({
   max: 3,
   ssl: { rejectUnauthorized: false },
 });
-
 const log = (s) => console.log(s);
 
+const USDC = '0x3600000000000000000000000000000000000000';
+const rpc = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network';
+const circleKey = process.env.CIRCLE_API_KEY || '';
+
+const balanceOf = async (addr) => {
+  const data = '0x70a08231000000000000000000000000' + addr.slice(2).toLowerCase();
+  const r = await fetch(rpc, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: USDC, data }, 'latest'] }),
+  });
+  const j = await r.json();
+  return j.result ? Number(BigInt(j.result)) / 1e6 : NaN;
+};
+
 try {
-  const t = await pool.query(
-    "SELECT side, usdc_amount, user_id FROM trades WHERE user_id LIKE 'agent_%'"
-  );
-  const rows = t.rows || [];
-  const bySide = {};
-  let neg = 0, sum = 0;
-  for (const r of rows) {
-    bySide[r.side] = (bySide[r.side] || 0) + 1;
-    if (Number(r.usdc_amount) < 0) neg++;
-    sum += Number(r.usdc_amount);
-  }
-  log('agent trades total: ' + rows.length + ' bySide: ' + JSON.stringify(bySide) + ' neg rows: ' + neg + ' sum: ' + sum.toFixed(4));
+  const w = await pool.query("SELECT user_id, wallet_id FROM wallets WHERE user_id LIKE 'agent_%'");
+  log('wallets: ' + JSON.stringify(w.rows));
 
-  const byAgent = {};
-  for (const r of rows) {
-    const b = byAgent[r.user_id] = byAgent[r.user_id] || { n: 0, s: 0 };
-    b.n++; b.s += Number(r.usdc_amount);
+  for (const row of w.rows) {
+    let addr = null;
+    try {
+      const r = await fetch(`https://api.circle.com/v1/wallets/${row.wallet_id}`, {
+        headers: { Authorization: `Bearer ${circleKey}` },
+      });
+      const j = await r.json();
+      addr = j?.data?.wallet?.address || null;
+    } catch (e) { log(row.user_id + ' circle err: ' + e.message); }
+    let bal = NaN;
+    if (addr) bal = await balanceOf(addr);
+    log(`${row.user_id}: addr=${addr} usdc=${Number.isNaN(bal) ? 'ERR' : bal.toFixed(4)}`);
   }
-  log('perAgent: ' + JSON.stringify(byAgent));
 
-  const b = await pool.query('SELECT agent_key, amount_usdc, status FROM agent_bonds');
-  log('bonds count: ' + b.rows.length);
-  const agg = {};
-  for (const r of b.rows) {
-    const k = agg[r.agent_key] = agg[r.agent_key] || { total: 0, by: {} };
-    k.total += Number(r.amount_usdc || 0);
-    k.by[r.status] = (k.by[r.status] || 0) + 1;
+  if (process.env.PRIVATE_KEY) {
+    const { privateKeyToAccount } = await import('viem/accounts');
+    const admin = privateKeyToAccount(process.env.PRIVATE_KEY.startsWith('0x') ? process.env.PRIVATE_KEY : '0x' + process.env.PRIVATE_KEY);
+    const tb = await balanceOf(admin.address);
+    log(`treasury(admin): addr=${admin.address} usdc=${Number.isNaN(tb) ? 'ERR' : tb.toFixed(4)}`);
   }
-  log('bonds: ' + JSON.stringify(agg).slice(0, 1200));
-
-  const p = await pool.query('SELECT payer, pay_to, amount_usdc, endpoint FROM x402_payments');
-  log('payments count: ' + p.rows.length);
-  let agentOut = 0, agentIn = 0;
-  for (const r of p.rows) {
-    if (String(r.payer).startsWith('agent_')) agentOut += Number(r.amount_usdc || 0);
-    if (String(r.pay_to).startsWith('agent_')) agentIn += Number(r.amount_usdc || 0);
-  }
-  log('payments agentOut=' + agentOut.toFixed(3) + ' agentIn=' + agentIn.toFixed(3));
 } catch (e) {
   log('PROBE ERR: ' + e.message);
 }
