@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 const { registerAgentPnl } = await import('../lib/agent_pnl.js');
 
 // ── In-memory fake Supabase ────────────────────────────────────────────────
-function makeSupabase({ signals = [], bonds = [], payments = [], trades = [] } = {}) {
-  const tables = { creator_signals: signals, x402_payments: payments, trades };
+function makeSupabase({ signals = [], bonds = [], payments = [], trades = [], markets = [] } = {}) {
+  const tables = { creator_signals: signals, x402_payments: payments, trades, deployed_markets: markets };
   // Pre-seed bonds into creator_signals (same table, different select columns).
   for (const b of bonds) {
     const existing = tables.creator_signals.find((s) => s.id === b.id);
@@ -59,8 +59,8 @@ function makeSupabase({ signals = [], bonds = [], payments = [], trades = [] } =
   return { from: (t) => new B(t), __tables: tables };
 }
 
-function harness({ signals, bonds, payments, trades }) {
-  const supabase = makeSupabase({ signals, bonds, payments, trades });
+function harness({ signals, bonds, payments, trades, markets }) {
+  const supabase = makeSupabase({ signals, bonds, payments, trades, markets });
   const noop = () => {};
   const app = { get: noop };
   registerAgentPnl(app, { supabase, circle: {} });
@@ -192,6 +192,38 @@ test('P&L: summary totals are correct across multiple agents', async () => {
   assert.equal(captured.summary.totalNet, 13);
   assert.equal(captured.summary.profitable, 2);
   assert.equal(captured.summary.unprofitable, 0);
+});
+
+test('P&L: buys on open markets stay pending; only resolved-lost markets charge cost', async () => {
+  const supa = harness({
+    signals: [],
+    bonds: [],
+    payments: [],
+    markets: [
+      { contract_address: '0xLOST', outcome: false, resolved: true },
+      { contract_address: '0xWON', outcome: true, resolved: true },
+    ],
+    trades: [
+      // YES bought on a market that resolved outcome=false → YES lost → full cost
+      { user_id: 'agent_trader', usdc_amount: 1.0, tx_hash: '0xa1', state: 'COMPLETE', side: 'YES', market_id: '0xLOST' },
+      // NO bought on an open market → pending, NOT a cost until resolved
+      { user_id: 'agent_trader', usdc_amount: 2.0, tx_hash: '0xa2', state: 'COMPLETE', side: 'NO', market_id: '0xOPEN' },
+      // YES bought on a resolved-win market → pending until claimed
+      { user_id: 'agent_trader', usdc_amount: 0.5, tx_hash: '0xa3', state: 'COMPLETE', side: 'YES', market_id: '0xWON' },
+      // Claim on the win market → realized
+      { user_id: 'agent_trader', usdc_amount: 1.0, tx_hash: '0xa4', state: 'COMPLETE', side: 'CLAIM', market_id: '0xWON' },
+    ],
+  });
+  const { captured } = await callEndpoint(supa);
+  const trader = captured.agents.find((a) => a.agent === 'agent_trader');
+  assert.ok(trader);
+  // Costs: only the lost 1.0 is fully charged; open-market buy (2.0) stays
+  // pending; the won market is charged up to its realized claim (0.5).
+  assert.equal(trader.costs, 1.5);
+  assert.equal(trader.revenue, 1.0);
+  assert.equal(trader.net, -0.5);
+  assert.equal(trader.tradingBuys, 1.5);
+  assert.equal(trader.tradingSells, 1.0);
 });
 
 test('P&L: agents are sorted by net descending', async () => {
