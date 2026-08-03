@@ -1,50 +1,54 @@
-import { createClient } from '@supabase/supabase-js';
+import pg from 'pg';
 
-const c = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY);
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 3,
+  ssl: { rejectUnauthorized: false },
+});
 
-const out = [];
-const log = (s) => { out.push(s); console.log(s); };
+const log = (s) => console.log(s);
 
-const { data: trades, error: e1 } = await c.from('trades').select('side,usdc_amount,user_id').like('user_id', 'agent_%');
-log('trades err: ' + (e1?.message || 'none'));
-const rows = trades || [];
-const bySide = {};
-let neg = 0, sum = 0;
-for (const t of rows) {
-  bySide[t.side] = (bySide[t.side] || 0) + 1;
-  if (Number(t.usdc_amount) < 0) neg++;
-  sum += Number(t.usdc_amount);
-}
-log('agent trades total: ' + rows.length + ' bySide: ' + JSON.stringify(bySide) + ' neg rows: ' + neg + ' sum usdc: ' + sum.toFixed(4));
+try {
+  const t = await pool.query(
+    "SELECT side, usdc_amount, user_id FROM trades WHERE user_id LIKE 'agent_%'"
+  );
+  const rows = t.rows || [];
+  const bySide = {};
+  let neg = 0, sum = 0;
+  for (const r of rows) {
+    bySide[r.side] = (bySide[r.side] || 0) + 1;
+    if (Number(r.usdc_amount) < 0) neg++;
+    sum += Number(r.usdc_amount);
+  }
+  log('agent trades total: ' + rows.length + ' bySide: ' + JSON.stringify(bySide) + ' neg rows: ' + neg + ' sum: ' + sum.toFixed(4));
 
-const byAgent = {};
-for (const t of rows) {
-  const b = byAgent[t.user_id] = byAgent[t.user_id] || { n: 0, s: 0 };
-  b.n++; b.s += Number(t.usdc_amount);
-}
-log('perAgent: ' + JSON.stringify(byAgent));
+  const byAgent = {};
+  for (const r of rows) {
+    const b = byAgent[r.user_id] = byAgent[r.user_id] || { n: 0, s: 0 };
+    b.n++; b.s += Number(r.usdc_amount);
+  }
+  log('perAgent: ' + JSON.stringify(byAgent));
 
-const { data: bonds, error: e2 } = await c.from('agent_bonds').select('agent_key,amount_usdc,status');
-log('bonds err: ' + (e2?.message || 'none') + ' count: ' + (bonds?.length || 0));
-if (bonds) {
+  const b = await pool.query('SELECT agent_key, amount_usdc, status FROM agent_bonds');
+  log('bonds count: ' + b.rows.length);
   const agg = {};
-  for (const b of bonds) {
-    const k = agg[b.agent_key] = agg[b.agent_key] || { total: 0, by: {} };
-    k.total += Number(b.amount_usdc || 0);
-    k.by[b.status] = (k.by[b.status] || 0) + 1;
+  for (const r of b.rows) {
+    const k = agg[r.agent_key] = agg[r.agent_key] || { total: 0, by: {} };
+    k.total += Number(r.amount_usdc || 0);
+    k.by[r.status] = (k.by[r.status] || 0) + 1;
   }
   log('bonds: ' + JSON.stringify(agg).slice(0, 1200));
-}
 
-const { data: payments, error: e3 } = await c.from('x402_payments').select('payer,pay_to,amount_usdc,endpoint').limit(3000);
-log('payments err: ' + (e3?.message || 'none') + ' count: ' + (payments?.length || 0));
-if (payments) {
-  let agentIn = 0, agentOut = 0;
-  for (const p of payments) {
-    if (String(p.payer).startsWith('agent_')) agentOut += Number(p.amount_usdc || 0);
-    if (String(p.pay_to).startsWith('agent_')) agentIn += Number(p.amount_usdc || 0);
+  const p = await pool.query('SELECT payer, pay_to, amount_usdc, endpoint FROM x402_payments');
+  log('payments count: ' + p.rows.length);
+  let agentOut = 0, agentIn = 0;
+  for (const r of p.rows) {
+    if (String(r.payer).startsWith('agent_')) agentOut += Number(r.amount_usdc || 0);
+    if (String(r.pay_to).startsWith('agent_')) agentIn += Number(r.amount_usdc || 0);
   }
-  log('payments: agentOut=' + agentOut.toFixed(3) + ' agentIn=' + agentIn.toFixed(3));
+  log('payments agentOut=' + agentOut.toFixed(3) + ' agentIn=' + agentIn.toFixed(3));
+} catch (e) {
+  log('PROBE ERR: ' + e.message);
 }
-
+await pool.end();
 process.exit(0);
