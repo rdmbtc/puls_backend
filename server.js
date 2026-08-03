@@ -833,7 +833,11 @@ const rpcTransport = rpcUrl === publicRpcUrl
     );
 const publicClient = createPublicClient({
   chain: arcTestnet,
-  transport: rpcTransport
+  transport: rpcTransport,
+  // Batch concurrent reads into single multicall requests (Multicall3 is
+  // deployed on Arc) — the swarm's per-contract position checks were
+  // tripping the node's rate limit ("Request exceeds defined limit").
+  batch: { multicall: true }
 });
 
 const adminPrivateKey = process.env.PRIVATE_KEY ? process.env.PRIVATE_KEY.trim() : null;
@@ -5031,13 +5035,42 @@ async function checkAndResolveMarkets() {
         await publicClient.waitForTransactionReceipt({ hash });
       } catch (resolveErr) {
         // If the market is already resolved on-chain, the contract reverts.
-        // Don't spam the error log  mark it as resolved and move on.
-        if (/already resolved/i.test(resolveErr.message || '') || /resolved/i.test(resolveErr.shortMessage || '')) {
-          console.log(`[resolve] ${market.slug} was already resolved on-chain  marking in cache`);
+        // Don't spam the error log — mark it as resolved and move on. But a
+        // revert message merely CONTAINING "resolved" (e.g. "cannot be
+        // resolved before deadline") is NOT proof of resolution: the old loose
+        // regex marked markets resolved while they were still live on-chain,
+        // which made agents' claim scans target unreal markets and polluted
+        // the P&L. Verify on-chain before marking.
+        const revertMsg = `${resolveErr.message || ''} ${resolveErr.shortMessage || ''}`;
+        if (/already resolved/i.test(revertMsg) || /cannot (be )?resolved before/i.test(revertMsg)) {
+          let resolvedOnChain = false, outcomeOnChain = false;
+          try {
+            [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
+              address: market.contractAddress,
+              abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
+                outputs: [
+                  { name: '_slug', type: 'string' },
+                  { name: '_deadline', type: 'uint256' },
+                  { name: '_resolved', type: 'bool' },
+                  { name: '_outcome', type: 'bool' },
+                  { name: '_yesOutstanding', type: 'uint256' },
+                  { name: '_noOutstanding', type: 'uint256' }
+                ] }],
+              functionName: 'getMarketInfo'
+            });
+          } catch (readErr) {
+            console.warn(`[resolve] ${market.slug} revert-check read failed: ${readErr.message}`);
+            continue;
+          }
+          if (!resolvedOnChain) {
+            console.warn(`[resolve] ${market.slug} resolve() reverted (${revertMsg.slice(0, 80)}) but chain still unresolved — leaving pending`);
+            continue;
+          }
           const entry = deployedMarketsCache.get(market.slug);
-          if (entry) { entry.resolved = true; entry.outcome = outcome; }
-          await supabase.from('deployed_markets').update({ resolved: true, outcome }).eq('slug', market.slug);
-          eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome });
+          if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
+          await supabase.from('deployed_markets').update({ resolved: true, outcome: outcomeOnChain }).eq('slug', market.slug);
+          eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
+          console.log(`[resolve] ${market.slug} was already resolved on-chain  marking in cache`);
           continue;
         }
         throw resolveErr; // re-throw real errors
