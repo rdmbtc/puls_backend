@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 const { registerAgentPnl } = await import('../lib/agent_pnl.js');
 
 // ── In-memory fake Supabase ────────────────────────────────────────────────
-function makeSupabase({ signals = [], bonds = [], payments = [] } = {}) {
-  const tables = { creator_signals: signals, x402_payments: payments };
+function makeSupabase({ signals = [], bonds = [], payments = [], trades = [] } = {}) {
+  const tables = { creator_signals: signals, x402_payments: payments, trades };
   // Pre-seed bonds into creator_signals (same table, different select columns).
   for (const b of bonds) {
     const existing = tables.creator_signals.find((s) => s.id === b.id);
@@ -59,8 +59,8 @@ function makeSupabase({ signals = [], bonds = [], payments = [] } = {}) {
   return { from: (t) => new B(t), __tables: tables };
 }
 
-function harness({ signals, bonds, payments }) {
-  const supabase = makeSupabase({ signals, bonds, payments });
+function harness({ signals, bonds, payments, trades }) {
+  const supabase = makeSupabase({ signals, bonds, payments, trades });
   const noop = () => {};
   const app = { get: noop };
   registerAgentPnl(app, { supabase, circle: {} });
@@ -210,3 +210,32 @@ test('P&L: agents are sorted by net descending', async () => {
   assert.equal(captured.agents[1].agent, 'agent_loser');
   assert.ok(captured.agents[0].net > captured.agents[1].net);
 });
+
+test('P&L: trading ledger counts buys as costs, sells/claims as revenue, dedupes tx_hash', async () => {
+  const supa = harness({
+    signals: [],
+    bonds: [],
+    payments: [],
+    trades: [
+      { user_id: 'agent_trader', usdc_amount: 2.0, tx_hash: '0xaaaa', state: 'COMPLETE', side: 'YES' },
+      { user_id: 'agent_trader', usdc_amount: 2.0, tx_hash: '0xaaaa', state: 'COMPLETE', side: 'YES' },
+      { user_id: 'agent_trader', usdc_amount: -1.5, tx_hash: '0xbbbb', state: 'COMPLETE', side: 'YES' },
+      { user_id: 'agent_trader', usdc_amount: 3.0, tx_hash: '0xcccc', state: 'COMPLETE', side: 'CLAIM' },
+      { user_id: 'agent_trader', usdc_amount: 0.5, tx_hash: '0xdddd', state: 'COMPLETE', side: 'YES' },
+      { user_id: 'agent_trader', usdc_amount: 0.5, tx_hash: '0xdddd', state: 'COMPLETE', side: 'YES' },
+      { user_id: 'human1', usdc_amount: -9.0, tx_hash: '0xeeee', state: 'COMPLETE', side: 'NO' },
+    ],
+  });
+  const { captured } = await callEndpoint(supa);
+  const trader = captured.agents.find((a) => a.agent === 'agent_trader');
+  assert.ok(trader, 'agent_trader should be in the report');
+  // Bought 2.0 (deduped) + 0.5 (deduped) = 2.5 cost; sold 1.5 + claimed 3.0 = 4.5 revenue
+  assert.equal(trader.tradingBuys, 2.5);
+  assert.equal(trader.tradingSells, 4.5);
+  assert.equal(trader.costs, 2.5);
+  assert.equal(trader.revenue, 4.5);
+  assert.equal(trader.net, 2.0);
+  assert.equal(trader.isProfitable, true);
+  assert.equal(captured.agents.length, 1);
+});
+

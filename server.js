@@ -1536,13 +1536,17 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
 
     if (existing && existing.length > 0) {
       const trade = existing[0];
+      const upd = {
+        state: 'COMPLETE',
+        tx_hash: txHash,
+        usdc_amount: amountUsdc,
+      };
+      if (amountUsdc > 0 && entryPrice !== undefined && trade.entry_price !== entryPrice) {
+        upd.entry_price = entryPrice;
+      }
       const { data: updatedTrade } = await supabase
         .from('trades')
-        .update({
-          state: 'COMPLETE',
-          tx_hash: txHash,
-          usdc_amount: amountUsdc,
-        })
+        .update(upd)
         .eq('id', trade.id)
         .select()
         .single();
@@ -1567,10 +1571,13 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
       
       if (dup && dup.length > 0) {
         const existingTrade = dup[0];
-        if (existingTrade.usdc_amount !== amountUsdc) {
+        const patch = {};
+        if (existingTrade.usdc_amount !== amountUsdc) patch.usdc_amount = amountUsdc;
+        if (amountUsdc > 0 && entryPrice !== undefined && existingTrade.entry_price !== entryPrice) patch.entry_price = entryPrice;
+        if (Object.keys(patch).length > 0) {
           const { data: updatedTrade } = await supabase
             .from('trades')
-            .update({ usdc_amount: amountUsdc })
+            .update(patch)
             .eq('id', existingTrade.id)
             .select()
             .single();
@@ -1578,7 +1585,7 @@ async function syncCompletedTrade(userId, { marketId, side, amountUsdc, shares, 
           if (updatedTrade) {
             broadcastTrade(updatedTrade);
           }
-          console.log(`[QuickNode Webhook] Updated existing trade ${existingTrade.id} with correct on-chain usdc_amount: ${amountUsdc}`);
+          console.log(`[QuickNode Webhook] Updated existing trade ${existingTrade.id} with on-chain data: ${JSON.stringify(patch)}`);
         }
         return;
       }
@@ -4693,6 +4700,12 @@ async function handleQuickNodeLog(log) {
         .limit(1);
 
       if (dup && dup.length > 0) {
+        const existing = dup[0];
+        const payout = Number(args.payout) / 1e6;
+        if (existing.side === 'CLAIM' && (!Number(existing.usdc_amount))) {
+          await supabase.from('trades').update({ usdc_amount: payout }).eq('id', existing.id).catch(() => {});
+          console.log(`[QuickNode Webhook] Backfilled CLAIM trade ${existing.id} payout: ${payout} USDC`);
+        }
         console.log(`[QuickNode Webhook] Claim event for tx ${txHash} already exists, skipping.`);
         return;
       }
@@ -4703,7 +4716,7 @@ async function handleQuickNodeLog(log) {
           user_id: userId,
           tx_id: `ext_${Date.now()}`,
           side: 'CLAIM',
-          usdc_amount: 0,
+          usdc_amount: Number(args.payout) / 1e6,
           entry_price: 0,
           question: 'Claim Winnings',
           market_id: contractAddress,
@@ -8344,7 +8357,37 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
       if (question.length > 0) {
         question = question.charAt(0).toUpperCase() + question.slice(1);
       }
-      
+
+      let entryPrice = 0.5;
+      if (txHash) {
+        try {
+          const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+          for (const log of (receipt?.logs || [])) {
+            if (String(log.address).toLowerCase() !== String(contractAddress).toLowerCase()) continue;
+            try {
+              const decoded = decodeEventLog({ abi: MARKET_EVENTS_ABI, data: log.data, topics: log.topics });
+              if (decoded.eventName === 'Bought' && decoded.args) {
+                const amt = Number(decoded.args.amount) / 1e6;
+                const sh = Number(decoded.args.shares) / 1e6;
+                if (sh > 0) entryPrice = Math.min(0.99, Math.max(0.01, amt / sh));
+                break;
+              }
+            } catch (_) {}
+          }
+        } catch (e) { console.warn(`executeAgentTrade price decode failed: ${e.message}`); }
+      }
+
+      if (txHash) {
+        const { data: dup } = await supabase.from('trades').select('*').eq('tx_hash', txHash).limit(1);
+        if (dup && dup.length > 0) {
+          const patch = { state: 'COMPLETE' };
+          if (dup[0].entry_price !== entryPrice) patch.entry_price = entryPrice;
+          if (Number(dup[0].usdc_amount || 0) !== amount) patch.usdc_amount = amount;
+          await supabase.from('trades').update(patch).eq('id', dup[0].id).catch(() => {});
+          return { ok: true, txHash, tradeId: dup[0].id, deduped: true };
+        }
+      }
+
       const { data: newTrade } = await supabase
         .from('trades')
         .insert({
@@ -8352,8 +8395,8 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
           tx_id: circleId,
           side,
           usdc_amount: amount,
-          entry_price: 0.5,
-          question: ` Agent: ${question}`,
+          entry_price: entryPrice,
+          question: `Agent: ${question}`,
           market_id: contractAddress,
           state: 'COMPLETE',
           tx_hash: txHash,
