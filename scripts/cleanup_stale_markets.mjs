@@ -14,16 +14,20 @@
 //   node scripts/cleanup_stale_markets.mjs --execute  # actually resolve + archive
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
-import { createPublicClient, createWalletClient, http } from 'viem';
+import { createPublicClient, createWalletClient, http, fallback } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arcTestnet } from 'viem/chains';
 
 const EXECUTE = process.argv.includes('--execute');
 const rpcUrl = (process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
+const publicRpcUrl = (process.env.ARC_PUBLIC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
+const rpcTransport = rpcUrl === publicRpcUrl
+  ? http(rpcUrl, { timeout: 10000 })
+  : fallback([http(rpcUrl, { timeout: 10000 }), http(publicRpcUrl, { timeout: 10000 })], { rank: false, retryCount: 1 });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-const publicClient = createPublicClient({ chain: arcTestnet, transport: http(rpcUrl) });
+const publicClient = createPublicClient({ chain: arcTestnet, transport: rpcTransport });
 const adminAccount = privateKeyToAccount(process.env.PRIVATE_KEY.startsWith('0x') ? process.env.PRIVATE_KEY : `0x${process.env.PRIVATE_KEY}`);
-const walletClient = createWalletClient({ account: adminAccount, chain: arcTestnet, transport: http(rpcUrl) });
+const walletClient = createWalletClient({ account: adminAccount, chain: arcTestnet, transport: rpcTransport });
 
 const MARKET_ABI = [
   { name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [], outputs: [

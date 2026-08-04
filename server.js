@@ -819,6 +819,7 @@ console.log(`[Wallets] New user wallets will be created as ${WALLET_ACCOUNT_TYPE
 
 const rpcUrl = (process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
 const publicRpcUrl = (process.env.ARC_PUBLIC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
+const maskRpcUrl = (u) => { try { const x = new URL(u); return `${x.hostname}${x.pathname.slice(0, 10)}...`; } catch { return `${String(u).slice(0, 20)}...`; } };
 // Primary (private) node first, public node as failover: the private node is
 // nginx rate-limited (429s) and occasionally blips with HTML error pages,
 // which used to break balance reads and the RPC proxy with 502s.
@@ -831,6 +832,7 @@ const rpcTransport = rpcUrl === publicRpcUrl
       ],
       { rank: false, retryCount: 1 }
     );
+console.log(`[RPC] primary=${maskRpcUrl(rpcUrl)}${rpcUrl !== publicRpcUrl ? ` fallback=${maskRpcUrl(publicRpcUrl)}` : ' (single node)'}`);
 const publicClient = createPublicClient({
   chain: arcTestnet,
   transport: rpcTransport,
@@ -846,7 +848,7 @@ const adminAccount = adminPrivateKey ? privateKeyToAccount(adminPrivateKey.start
 const walletClient = adminAccount ? createWalletClient({
   account: adminAccount,
   chain: arcTestnet,
-  transport: http(rpcUrl)
+  transport: rpcTransport
 }) : null;
 
 // Read the admin/treasury USDC balance (in whole USDC). Used by the funding
