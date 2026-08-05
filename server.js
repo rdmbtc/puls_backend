@@ -34,7 +34,7 @@ import { registerAgentOracle } from './lib/agent_oracle.js';
 import { researchQuestion } from './lib/agent_research.js';
 import { registerSwarm, buildSwarmRoster } from './lib/agent_swarm.js';
 import { registerAgentDuel } from './lib/agent_duel.js';
-import { registerAgentPnl } from './lib/agent_pnl.js';
+import { registerAgentPnl, syncSettlementClaims } from './lib/agent_pnl.js';
 import { registerLepton } from './lib/lepton.js';
 import { registerX402Markets } from './lib/x402_markets.js';
 import { registerBazaar } from './lib/bazaar.js';
@@ -4235,6 +4235,25 @@ registerAgentPnl(app, {
   supabase,
   circle,
 });
+
+//  Settlement-claim sync  agent payouts happen on-chain directly and are
+// rarely recorded in `trades` (only ~86 CLAIM rows vs 40k+ buys). This
+// backfills the missing CLAIM rows from the resolved-market share ledger so
+// the trades table (and anything consuming it) stays complete. Idempotent.
+let __claimSyncRunning = false;
+const __runClaimSync = async () => {
+  if (__claimSyncRunning) return;
+  __claimSyncRunning = true;
+  try {
+    await syncSettlementClaims(supabase);
+  } catch (e) {
+    console.warn('[claim_sync] error:', e?.message || String(e));
+  } finally {
+    __claimSyncRunning = false;
+  }
+};
+safeInterval('claim_sync', __runClaimSync, 10 * 60_000);
+setTimeout(() => { __runClaimSync().catch(() => {}); }, 30_000).unref?.();
 
 //  Puls Invest  real USDC sponsorship of AI agents via x402 
 // Pick an agent → pay USDC through Circle Gateway to the treasury → own a
