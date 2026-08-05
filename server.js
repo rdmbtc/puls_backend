@@ -5530,14 +5530,16 @@ async function updateLeaderboard() {
 
 // Event-driven leaderboard refresh: invalidate the cache + rebuild on trade
 // activity instead of a 10-minute poll. Debounced so a burst of trades only
-// triggers one rebuild.
+// triggers one rebuild. 60s debounce: a rebuild pages through ALL ~50k+ trades,
+// so with agents trading continuously a 10s debounce meant a full-table scan
+// every ~15s — constant load on the same dyno that serves the API.
 let _leaderboardRebuildTimer = null;
 function scheduleLeaderboardRebuild() {
   if (_leaderboardRebuildTimer) return; // already scheduled
   _leaderboardRebuildTimer = setTimeout(() => {
     _leaderboardRebuildTimer = null;
     updateLeaderboard().catch((e) => console.error('leaderboard rebuild:', e.message));
-  }, 10_000).unref?.();
+  }, 60_000).unref?.();
 }
 eventBus.on(EVENTS.TRADE_COMPLETE, () => scheduleLeaderboardRebuild());
 
