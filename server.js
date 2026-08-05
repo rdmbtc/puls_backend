@@ -4728,7 +4728,9 @@ async function handleQuickNodeLog(log) {
         const existing = dup[0];
         const payout = Number(args.payout) / 1e6;
         if (existing.side === 'CLAIM' && (!Number(existing.usdc_amount))) {
-          await supabase.from('trades').update({ usdc_amount: payout }).eq('id', existing.id).catch(() => {});
+          try {
+            await supabase.from('trades').update({ usdc_amount: payout }).eq('id', existing.id);
+          } catch (e) { console.warn(`[QuickNode Webhook] CLAIM backfill update failed: ${e.message}`); }
           console.log(`[QuickNode Webhook] Backfilled CLAIM trade ${existing.id} payout: ${payout} USDC`);
         }
         console.log(`[QuickNode Webhook] Claim event for tx ${txHash} already exists, skipping.`);
@@ -8437,7 +8439,9 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
           const patch = { state: 'COMPLETE' };
           if (dup[0].entry_price !== entryPrice) patch.entry_price = entryPrice;
           if (Number(dup[0].usdc_amount || 0) !== amount) patch.usdc_amount = amount;
-          await supabase.from('trades').update(patch).eq('id', dup[0].id).catch(() => {});
+          try {
+            await supabase.from('trades').update(patch).eq('id', dup[0].id);
+          } catch (e) { console.warn(`executeAgentTrade dedup patch failed: ${e.message}`); }
           return { ok: true, txHash, tradeId: dup[0].id, deduped: true };
         }
       }
