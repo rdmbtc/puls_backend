@@ -116,15 +116,20 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 // Real rate limiters (previously no-ops). Tune via env if needed.
 // When Valkey is configured the counters live in Valkey (shared across dynos,
 // survives restarts); otherwise express-rate-limit uses its in-memory store.
-const valkeyRateLimitStore = createValkeyRateLimitStore(60 * 1000);
-const rateLimitStoreOpts = valkeyRateLimitStore ? { store: valkeyRateLimitStore } : {};
+// One Valkey store PER limiter — express-rate-limit forbids sharing a single
+// store across limiters (ERR_ERL_STORE_REUSE). Each store gets its own key
+// prefix so counters never collide.
+const rateLimitStoreOpts = (tag) => {
+  const store = createValkeyRateLimitStore(60 * 1000, tag);
+  return store ? { store } : {};
+};
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_GENERAL || '300', 10),
   message: { error: 'Too many requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...rateLimitStoreOpts,
+  ...rateLimitStoreOpts('general'),
 });
 const strictLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -132,7 +137,7 @@ const strictLimiter = rateLimit({
   message: { error: 'Too many requests for this action. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...rateLimitStoreOpts,
+  ...rateLimitStoreOpts('strict'),
 });
 // Trading endpoints get a much more generous limit so rapid/fast-buy flows
 // are never blocked at current traffic levels (600/min per IP by default).
@@ -143,7 +148,7 @@ const tradeLimiter = rateLimit({
   message: { error: 'Too many trade requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...rateLimitStoreOpts,
+  ...rateLimitStoreOpts('trade'),
 });
 const activateMarketLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -151,7 +156,7 @@ const activateMarketLimiter = rateLimit({
   message: { error: 'Too many market activations. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...rateLimitStoreOpts,
+  ...rateLimitStoreOpts('activate'),
 });
 
 const app = express();
@@ -7781,7 +7786,7 @@ app.get('/api/redis/status', async (req, res) => {
     provider: 'Aiven Valkey',
     ping,
     stats,
-    rateLimitStore: Boolean(valkeyRateLimitStore),
+    rateLimitStore: Boolean(createValkeyRateLimitStore(60 * 1000)),
     timestamp: new Date().toISOString()
   });
 });
