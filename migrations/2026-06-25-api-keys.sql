@@ -17,3 +17,9 @@ create table if not exists api_keys (
 
 create index if not exists api_keys_user_idx on api_keys(user_id);
 create index if not exists api_keys_hash_idx on api_keys(key_hash);
+
+-- Upgrade path: older api_keys tables (pre key_prefix/last_used_at/revoked)
+-- created before this migration. Idempotent — safe to re-run on any env.
+alter table api_keys add column if not exists key_prefix text;
+alter table api_keys add column if not exists last_used_at timestamptz;
+alter table api_keys add column if not exists revoked boolean not null default false;
