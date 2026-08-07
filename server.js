@@ -4097,7 +4097,7 @@ registerReferrals(app, {
 // receipt endpoint='signal_unlock'). Per-signal analytics (views/unlocks/rev).
 // Live payments gated by SIGNALS_PAID_ENABLED; on-chain attest needs
 // SIGNAL_REGISTRY_ADDRESS + admin wallet (best-effort, degrades gracefully).
-registerApiKeys(app, { supabase, authenticateUser, requireVerifiedUser, strictLimiter });
+registerApiKeys(app, { supabase, authenticateUser, requireVerifiedUser, strictLimiter, apiKeyOrAuth });
 
 registerCreatorSignals(app, {
   supabase,
@@ -6675,7 +6675,9 @@ async function resolveMarketByName(name, feed) {
 
 // budget + market and executes the buy autonomously from the agent wallet.
   // Hard timeout at 28s to beat Heroku's 30s H12 limit (LLM retries can take time).
-  app.post('/api/agent/chat', strictLimiter, async (req, res) => {
+  // apiKeyOrAuth: the CLI chats via `Authorization: Bearer pk_live_…` with no
+  // body userId — the key resolves to its owner and the id is forced in.
+  app.post('/api/agent/chat', apiKeyOrAuth, strictLimiter, async (req, res) => {
     const timeoutMs = 28000;
     const timer = setTimeout(() => {
       if (!res.headersSent) res.status(504).json({ error: 'Agent timeout', path: req.path });
