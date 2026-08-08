@@ -20,8 +20,13 @@ const MEMO_CONTRACT = '0x5294E9927c3306DcBaDb03fe70b92e01cCede505';
 const ROSTER_URL = process.env.INVEST_ROSTER_URL || 'https://api.pulsmarket.tech/api/agents/roster';
 
 const amount = Number(process.argv[2]);
-if (!amount || amount <= 0) { console.error('usage: node scripts/fund_agents.mjs <amount> [--only a,b] [--dry-run]'); process.exit(1); }
+if (!amount || amount <= 0) { console.error('usage: node scripts/fund_agents.mjs <amount> [--only a,b] [--direct key=address ...] [--dry-run]'); process.exit(1); }
 const only = new Set((process.argv.find((a) => a.startsWith('--only=')) || '').split('=')[1]?.split(',').filter(Boolean) || []);
+const direct = process.argv
+  .filter((a) => a.startsWith('--direct='))
+  .map((a) => a.split('=').slice(1).join('=').split('='))
+  .map(([k, ...rest]) => [k, rest.join('=')])
+  .filter(([, addr]) => addr);
 const dryRun = process.argv.includes('--dry-run');
 
 const rpcUrl = (process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
@@ -68,11 +73,13 @@ async function transferTo(address, usdc, memoKey) {
 }
 
 const agents = await roster();
-if (!agents.length) { console.error('no agents matched'); process.exit(1); }
-console.log(`sending ${amount} USDC each to ${agents.length} agent(s): ${agents.map((a) => a.key).join(', ')}${dryRun ? ' [DRY RUN]' : ''}`);
+const extra = direct.map(([k, address]) => ({ key: k, address }));
+const targets = [...agents, ...extra];
+if (!targets.length) { console.error('no agents matched'); process.exit(1); }
+console.log(`sending ${amount} USDC each to ${targets.length} target(s): ${targets.map((a) => a.key).join(', ')}${dryRun ? ' [DRY RUN]' : ''}`);
 
 let sent = 0;
-for (const a of agents) {
+for (const a of targets) {
   if (dryRun) { console.log(`${a.key}: would send ${amount} → ${a.address}`); continue; }
   const hash = await transferTo(a.address, amount, a.key);
   const rc = await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
