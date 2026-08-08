@@ -46,7 +46,7 @@ import { eventBus, EVENTS } from './lib/events.js';
 import { cache } from './lib/cache.js';
 import { initSocketIo } from './lib/socketio.js';
 import { initRawWs } from './lib/socketws.js';
-import { fetchGamma, fetchMarketForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
+import { fetchGamma, fetchMarketForResolution, fetchMarketsForResolution, drainConsecutiveFailures } from './lib/polymarket_client.js';
 import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
 import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, searchSignalMarket, osClient, pingOpenSearch, getOpenSearchStats, scheduleMarketRefresh } from './lib/opensearch.js';
 import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware, createValkeyRateLimitStore, redisPing, getRedisStats, shutdownRedis } from './lib/redis.js';
@@ -2381,11 +2381,20 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
         if (row.archived === true) continue;
         const slug = row.slug;
         const contractAddress = row.contract_address;
-        
+
+        // A user-created market whose deadline has passed is over, whether or
+        // not the resolution cron has caught up with it yet. Listing it makes
+        // the feed offer a trade that /api/trade/buy and the contract both
+        // reject — the "market already closed" error users were hitting.
+        const deadlineSec = Number(row.deadline) || 0;
+        if (row.resolved === true) continue;
+        if (deadlineSec > 0 && deadlineSec * 1000 <= Date.now()) continue;
+
         let yesPrice = 0.5, noPrice = 0.5, poolYes = 0, poolNo = 0, totalVolume = 0;
-        
+        let resolvedOnChain = false;
+
         try {
-          const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = await publicClient.readContract({
+          const [slugOnChain, deadlineOnChain, _resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = await publicClient.readContract({
             address: contractAddress,
             abi: [
               {
@@ -2406,9 +2415,10 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
             functionName: 'getMarketInfo'
           });
 
+          resolvedOnChain = _resolvedOnChain === true;
           poolYes = Number(yesOutstanding) / 1_000_000;
           poolNo = Number(noOutstanding) / 1_000_000;
-          
+
           const bVal = 10;
           const maxQ = Math.max(poolYes, poolNo);
           const expYes = Math.exp((poolYes - maxQ) / bVal);
@@ -2419,6 +2429,10 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
         } catch (err) {
           console.error(`Error reading custom market ${contractAddress} on-chain:`, err.message);
         }
+
+        // The chain is the authority: resolved there means resolved, even if
+        // Supabase hasn't been updated yet.
+        if (resolvedOnChain) continue;
 
         customList.push({
           id: slug,
@@ -2435,9 +2449,12 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
           outcome: row.outcome,
           totalVolume,
           image: row.image_url || `https://api.dicebear.com/7.x/identicon/png?size=128&seed=${slug}`,
-          endDateIso: new Date(Number(row.deadline) * 1000).toISOString(),
+          endDateIso: new Date(deadlineSec * 1000).toISOString(),
+          endDate: new Date(deadlineSec * 1000).toISOString(),
           outcomePrices: JSON.stringify([yesPrice.toString(), noPrice.toString()]),
           featured: false,
+          ended: false,
+          acceptingOrders: true,
           createdByAgent: row.created_by_agent === true,
           creatorId: row.creator_id || null,
         });
@@ -2529,7 +2546,8 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
       // Polymarket also leaves some markets `active:true` past their endDate until
       // UMA resolves them  treat a passed deadline as ended too, so the feed stays
       // consistent with the /api/trade/buy deadline guard and the on-chain market.
-      const deadlineMs = j.endDate ? Date.parse(j.endDate) : NaN;
+      const endRaw = j.endDate || j.endDateIso;
+      const deadlineMs = endRaw ? Date.parse(endRaw) : NaN;
       const deadlinePassed = Number.isFinite(deadlineMs) && deadlineMs < Date.now();
       const eventEnded = j.ended === true || j.finishedTimestamp != null || resolved === true || deadlinePassed;
 
@@ -2549,6 +2567,14 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
     }));
 
     const mergedList = [...customList, ...pmMergedList]
+      // Ended markets are dropped, not merely flagged. `ended`/`acceptingOrders`
+      // were already computed above, but nothing downstream consumed them: the
+      // app has no such field on its Market model, so a finished event stayed in
+      // the feed looking perfectly tradeable until the user tapped buy and got
+      // "This market has closed" from /api/trade/buy. The resolution cron
+      // eventually archives these, but the feed must not depend on how far
+      // behind the cron is.
+      .filter((m) => m && m.ended !== true)
       .map((m) => ({ ...m, ...pulsActivity(m) }));
 
     // We want to show ALL markets, regardless of holder count.
@@ -4896,241 +4922,360 @@ async function archiveMarket(slug, reason) {
   }
 }
 
-async function checkAndResolveMarkets() {
-  // Only log if there are markets to check (reduces log spam)
-  const now = Math.floor(Date.now() / 1000);
-  const archiveCutoff = now - ARCHIVE_AFTER_DAYS * 24 * 3600;
-  
-  const marketsToResolve = [];
-  for (const [slug, entry] of deployedMarketsCache.entries()) {
-    if (entry.deadline < now && !entry.resolved) {
-      marketsToResolve.push({ slug, ...entry });
+// ── Bounded-concurrency map ───────────────────────────────────────────────
+// The resolution cron used to be one long sequential loop: per market an
+// on-chain read, then up to two Gamma round-trips (each with its own retry and
+// backoff budget), then the resolve tx — all strictly one after another. A few
+// dozen past-deadline markets therefore took tens of minutes per tick, and
+// until a tick finished nothing else could resolve. Reads are now fanned out;
+// only the writes stay serial, because they all come from one admin account
+// and parallel sends would collide on the nonce.
+async function pMap(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= items.length) return;
+        out[i] = await fn(items[i], i);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return out;
+}
+
+// ── Per-market re-check backoff ───────────────────────────────────────────
+// Markets that are past their deadline but that Polymarket has not settled yet
+// are the bulk of every tick, and they stay in that state for hours or days.
+// Re-asking Gamma about each of them every two minutes was most of the cron's
+// wall time and most of its rate-limit budget — the budget the handful of
+// genuinely-settled markets need to resolve promptly. Back each one off
+// exponentially instead, capped low enough that nothing waits long.
+const RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const RESOLVE_BACKOFF_MAX_MS = 10 * 60 * 1000;
+const RESOLVE_CONCURRENCY = 8;
+// Hard cap per tick so a large backlog can't produce one unbounded run; the
+// remainder is picked up by an immediate follow-up tick.
+const RESOLVE_MAX_PER_TICK = 60;
+
+const _resolveBackoff = new Map(); // slug -> { until, tries }
+let _resolutionRunning = false;
+let _resolutionHasMoreWork = false;
+
+function _backoffResolve(slug) {
+  const tries = (_resolveBackoff.get(slug)?.tries || 0) + 1;
+  const wait = Math.min(
+    RESOLVE_BACKOFF_BASE_MS * 2 ** (tries - 1),
+    RESOLVE_BACKOFF_MAX_MS,
+  );
+  _resolveBackoff.set(slug, { until: Date.now() + wait, tries });
+}
+
+function _resolveBackoffActive(slug) {
+  const entry = _resolveBackoff.get(slug);
+  if (!entry) return false;
+  if (Date.now() >= entry.until) {
+    _resolveBackoff.delete(slug);
+    return false;
+  }
+  return true;
+}
+
+const MARKET_INFO_ABI = [{
+  name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
+  outputs: [
+    { name: '_slug', type: 'string' },
+    { name: '_deadline', type: 'uint256' },
+    { name: '_resolved', type: 'bool' },
+    { name: '_outcome', type: 'bool' },
+    { name: '_yesOutstanding', type: 'uint256' },
+    { name: '_noOutstanding', type: 'uint256' },
+  ],
+}];
+
+/** Mark a market resolved in the in-memory cache + Supabase. */
+async function _markMarketResolved(slug, outcome) {
+  const entry = deployedMarketsCache.get(slug);
+  if (entry) { entry.resolved = true; entry.outcome = outcome; }
+  _resolveBackoff.delete(slug);
+  try {
+    await supabase
+      .from('deployed_markets')
+      .update({ resolved: true, outcome })
+      .eq('slug', slug);
+  } catch (e) {
+    console.warn(`[resolve] DB update failed for ${slug}: ${e.message}`);
+  }
+}
+
+/**
+ * Settle one past-deadline market. Called serially — it can send a transaction
+ * from the shared admin account.
+ *
+ * @param {object} market — { slug, contractAddress, deadline, ... }
+ * @param {object|null} pmMarket — the Gamma market, already fetched in batch
+ * @returns {Promise<boolean>} true if the market ended up resolved
+ */
+async function resolveDueMarket(market, pmMarket, archiveCutoff) {
+  if (!pmMarket) {
+    // Truly gone from Polymarket (neither open nor closed) — can't auto-resolve.
+    if (market.deadline < archiveCutoff) {
+      await archiveMarket(market.slug, 'slug gone from Polymarket');
+    } else {
+      _backoffResolve(market.slug);
     }
+    return false;
   }
 
-  if (marketsToResolve.length === 0) {
-    return; // silent  no spam when nothing to do
+  const isResolved = pmMarket.closed === true || pmMarket.resolved === true;
+  if (!isResolved) {
+    if (market.deadline < archiveCutoff) {
+      await archiveMarket(market.slug, `unresolved on Polymarket ${ARCHIVE_AFTER_DAYS}+ days past deadline`);
+    } else {
+      _backoffResolve(market.slug);
+    }
+    return false;
   }
 
-  // Only log if there are markets to resolve
-
-  for (const market of marketsToResolve) {
+  let outcome = null;
+  if (pmMarket.consensusOutcome === 'YES') {
+    outcome = true;
+  } else if (pmMarket.consensusOutcome === 'NO') {
+    outcome = false;
+  } else {
     try {
-      // Check on-chain state first  if the market is already resolved on-chain,
-      // mark it in our cache + DB and skip. This prevents "Already resolved"
-      // revert errors from spamming the logs on every cron tick.
-      if (market.contractAddress) {
-        try {
-          const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
-            address: market.contractAddress,
-            abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
-              outputs: [
-                { name: '_slug', type: 'string' },
-                { name: '_deadline', type: 'uint256' },
-                { name: '_resolved', type: 'bool' },
-                { name: '_outcome', type: 'bool' },
-                { name: '_yesOutstanding', type: 'uint256' },
-                { name: '_noOutstanding', type: 'uint256' }
-              ] }],
-            functionName: 'getMarketInfo'
-          });
-          if (resolvedOnChain) {
-            const entry = deployedMarketsCache.get(market.slug);
-            if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
-            await supabase.from('deployed_markets').update({ resolved: true, outcome: outcomeOnChain }).eq('slug', market.slug);
-            console.log(`[resolve] ${market.slug} already resolved on-chain (${outcomeOnChain ? 'YES' : 'NO'})  marked in cache`);
-            continue;
-          }
-        } catch (e) {
-          // RPC might be down  continue to Polymarket check as fallback
-          console.warn(`[resolve] on-chain check failed for ${market.slug}: ${e.message}`);
-        }
-      }
-
-      // Gamma's /markets?slug= returns ACTIVE markets only by default, so a
-      // CLOSED/resolved market came back EMPTY  the cron then treated it as
-      // "gone" and ARCHIVED it instead of resolving. The resilient client
-      // tries closed markets first (to settle them), then falls back to the
-      // open query (still-running ones). Retry + backoff + circuit breaker
-      // are handled inside fetchMarketForResolution.
-      const pmMarket = await fetchMarketForResolution(market.slug);
-      if (!pmMarket) {
-        // Truly gone from Polymarket (neither open nor closed)  can't auto-resolve.
-        if (market.deadline < archiveCutoff) await archiveMarket(market.slug, 'slug gone from Polymarket');
-        continue;
-      }
-      const isResolved = pmMarket.closed === true || pmMarket.resolved === true;
-      if (!isResolved) {
-        if (market.deadline < archiveCutoff) {
-          await archiveMarket(market.slug, `unresolved on Polymarket ${ARCHIVE_AFTER_DAYS}+ days past deadline`);
-        } else {
-          console.log(`Market ${market.slug} is past deadline but not yet resolved on Polymarket.`);
-        }
-        continue;
-      }
-      
-      let outcome = null;
-      if (pmMarket.consensusOutcome === 'YES') {
-        outcome = true;
-      } else if (pmMarket.consensusOutcome === 'NO') {
-        outcome = false;
-      } else {
-        try {
-          const prices = JSON.parse(pmMarket.outcomePrices || '[]');
-          if (parseFloat(prices[0]) > 0.9) outcome = true;
-          else if (parseFloat(prices[1]) > 0.9) outcome = false;
-        } catch {}
-      }
-
-      //  UMA optimistic oracle path 
-      // The request can be opened before the outcome is known; proposing and
-      // settling happen on later cron ticks as the OOV2 state machine advances.
-      // FALLBACK: if UMA processing fails (RPC down, timeout, etc.) or returns
-      // pending for too long, fall through to direct resolution so markets
-      // don't stay unresolved forever.
-      if (UMA_RESOLUTION && UMA_ADAPTER_ADDRESS) {
-        let umaResult = 'fallback';
-        try {
-          umaResult = await processUmaMarket(market, outcome);
-        } catch (e) {
-          console.error(`[UMA] processing failed for ${market.slug}: ${e.message}  falling back to direct resolve`);
-          umaResult = 'fallback';
-        }
-        if (umaResult === 'pending') {
-          console.log(`[UMA] ${market.slug} still pending  will check again next cycle`);
-          continue;
-        }
-        if (umaResult === 'resolved') {
-          // Read the final outcome from chain (source of truth after settlement).
-          const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
-            address: market.contractAddress,
-            abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
-              outputs: [
-                { name: '_slug', type: 'string' },
-                { name: '_deadline', type: 'uint256' },
-                { name: '_resolved', type: 'bool' },
-                { name: '_outcome', type: 'bool' },
-                { name: '_yesOutstanding', type: 'uint256' },
-                { name: '_noOutstanding', type: 'uint256' }
-              ] }],
-            functionName: 'getMarketInfo'
-          });
-          if (resolvedOnChain) {
-            await supabase
-              .from('deployed_markets')
-              .update({ resolved: true, outcome: outcomeOnChain })
-              .eq('slug', market.slug);
-            const entry = deployedMarketsCache.get(market.slug);
-            if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
-            eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
-            console.log(` [UMA] Market ${market.slug} settled via Optimistic Oracle: ${outcomeOnChain ? 'YES' : 'NO'}`);
-          }
-          continue;
-        }
-        // umaResult === 'fallback'  market predates UMA registration; resolve directly below.
-      }
-
-      if (outcome === null) {
-        if (market.deadline < archiveCutoff) {
-          await archiveMarket(market.slug, 'Polymarket closed but outcome indeterminate');
-        } else {
-          console.log(`Could not determine outcome for resolved market ${market.slug}`);
-        }
-        continue;
-      }
-
-      console.log(`Resolving on-chain market ${market.contractAddress} for slug ${market.slug} to outcome: ${outcome ? 'YES' : 'NO'}`);
-
-      try {
-        const { request } = await publicClient.simulateContract({
-          account: adminAccount,
-          address: market.contractAddress,
-          abi: [
-            {
-              name: 'resolve',
-              type: 'function',
-              stateMutability: 'nonpayable',
-              inputs: [{ name: '_outcome', type: 'bool' }],
-              outputs: []
-            }
-          ],
-          functionName: 'resolve',
-          args: [outcome]
-        });
-
-        const hash = await walletClient.writeContract(request);
-        console.log(`Resolution Tx Hash: ${hash}`);
-        await publicClient.waitForTransactionReceipt({ hash });
-      } catch (resolveErr) {
-        // If the market is already resolved on-chain, the contract reverts.
-        // Don't spam the error log — mark it as resolved and move on. But a
-        // revert message merely CONTAINING "resolved" (e.g. "cannot be
-        // resolved before deadline") is NOT proof of resolution: the old loose
-        // regex marked markets resolved while they were still live on-chain,
-        // which made agents' claim scans target unreal markets and polluted
-        // the P&L. Verify on-chain before marking.
-        const revertMsg = `${resolveErr.message || ''} ${resolveErr.shortMessage || ''}`;
-        if (/already resolved/i.test(revertMsg) || /cannot (be )?resolved before/i.test(revertMsg)) {
-          let resolvedOnChain = false, outcomeOnChain = false;
-          try {
-            [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
-              address: market.contractAddress,
-              abi: [{ name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
-                outputs: [
-                  { name: '_slug', type: 'string' },
-                  { name: '_deadline', type: 'uint256' },
-                  { name: '_resolved', type: 'bool' },
-                  { name: '_outcome', type: 'bool' },
-                  { name: '_yesOutstanding', type: 'uint256' },
-                  { name: '_noOutstanding', type: 'uint256' }
-                ] }],
-              functionName: 'getMarketInfo'
-            });
-          } catch (readErr) {
-            console.warn(`[resolve] ${market.slug} revert-check read failed: ${readErr.message}`);
-            continue;
-          }
-          if (!resolvedOnChain) {
-            console.warn(`[resolve] ${market.slug} resolve() reverted (${revertMsg.slice(0, 80)}) but chain still unresolved — leaving pending`);
-            continue;
-          }
-          const entry = deployedMarketsCache.get(market.slug);
-          if (entry) { entry.resolved = true; entry.outcome = outcomeOnChain; }
-          await supabase.from('deployed_markets').update({ resolved: true, outcome: outcomeOnChain }).eq('slug', market.slug);
-          eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
-          console.log(`[resolve] ${market.slug} was already resolved on-chain  marking in cache`);
-          continue;
-        }
-        throw resolveErr; // re-throw real errors
-      }
-      
-      await supabase
-        .from('deployed_markets')
-        .update({ resolved: true, outcome })
-        .eq('slug', market.slug);
-
-      market.resolved = true;
-      market.outcome = outcome;
-      eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome });
-      console.log(` Deployed market ${market.slug} resolved successfully.`);
-    } catch (e) {
-      console.error(`Failed to resolve market ${market.slug}:`, e.message);
-    }
+      const prices = JSON.parse(pmMarket.outcomePrices || '[]');
+      if (parseFloat(prices[0]) > 0.9) outcome = true;
+      else if (parseFloat(prices[1]) > 0.9) outcome = false;
+    } catch {}
   }
 
-  //  Post-cron Gamma health check 
-  // If Gamma API had a cluster of failures during this resolution run, alert
-  // via Sentry so the team knows Polymarket may be down  instead of
-  // discovering it when a user asks why nothing resolved for two days.
-  const gammaFailures = drainConsecutiveFailures();
-  if (gammaFailures >= 5) {
-    const msg = `Gamma API had ${gammaFailures} consecutive failures during resolution cron  Polymarket may be down`;
-    console.error(`[resolve] ${msg}`);
-    captureException(new Error(msg), {
-      cron: 'checkAndResolveMarkets',
-      gammaFailures,
-      marketsChecked: marketsToResolve.length,
+  // ── UMA optimistic oracle path ──
+  // The request can be opened before the outcome is known; proposing and
+  // settling happen on later cron ticks as the OOV2 state machine advances.
+  // FALLBACK: if UMA processing fails (RPC down, timeout, etc.) or returns
+  // pending for too long, fall through to direct resolution so markets
+  // don't stay unresolved forever.
+  if (UMA_RESOLUTION && UMA_ADAPTER_ADDRESS) {
+    let umaResult = 'fallback';
+    try {
+      umaResult = await processUmaMarket(market, outcome);
+    } catch (e) {
+      console.error(`[UMA] processing failed for ${market.slug}: ${e.message} — falling back to direct resolve`);
+      umaResult = 'fallback';
+    }
+    if (umaResult === 'pending') {
+      // The oracle advances on its own schedule; re-checking every couple of
+      // minutes achieves nothing but Gamma/RPC load.
+      _backoffResolve(market.slug);
+      console.log(`[UMA] ${market.slug} still pending — will check again later`);
+      return false;
+    }
+    if (umaResult === 'resolved') {
+      // Read the final outcome from chain (source of truth after settlement).
+      const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
+        address: market.contractAddress,
+        abi: MARKET_INFO_ABI,
+        functionName: 'getMarketInfo',
+      });
+      if (resolvedOnChain) {
+        await _markMarketResolved(market.slug, outcomeOnChain);
+        eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
+        console.log(`[UMA] Market ${market.slug} settled via Optimistic Oracle: ${outcomeOnChain ? 'YES' : 'NO'}`);
+        return true;
+      }
+      return false;
+    }
+    // umaResult === 'fallback' — market predates UMA registration; resolve directly below.
+  }
+
+  if (outcome === null) {
+    if (market.deadline < archiveCutoff) {
+      await archiveMarket(market.slug, 'Polymarket closed but outcome indeterminate');
+    } else {
+      _backoffResolve(market.slug);
+      console.log(`Could not determine outcome for resolved market ${market.slug}`);
+    }
+    return false;
+  }
+
+  console.log(`Resolving on-chain market ${market.contractAddress} for slug ${market.slug} to outcome: ${outcome ? 'YES' : 'NO'}`);
+
+  try {
+    const { request } = await publicClient.simulateContract({
+      account: adminAccount,
+      address: market.contractAddress,
+      abi: [{
+        name: 'resolve', type: 'function', stateMutability: 'nonpayable',
+        inputs: [{ name: '_outcome', type: 'bool' }],
+        outputs: [],
+      }],
+      functionName: 'resolve',
+      args: [outcome],
     });
+
+    const hash = await walletClient.writeContract(request);
+    console.log(`Resolution Tx Hash: ${hash}`);
+    // Bounded wait: writes are serial, so one stuck transaction would otherwise
+    // hold up every other due market indefinitely. If it lands late, next
+    // tick's on-chain pre-check picks it up.
+    await publicClient.waitForTransactionReceipt({ hash, timeout: 90_000 });
+  } catch (resolveErr) {
+    // If the market is already resolved on-chain, the contract reverts.
+    // Don't spam the error log — mark it as resolved and move on. But a
+    // revert message merely CONTAINING "resolved" (e.g. "cannot be
+    // resolved before deadline") is NOT proof of resolution: the old loose
+    // regex marked markets resolved while they were still live on-chain,
+    // which made agents' claim scans target unreal markets and polluted
+    // the P&L. Verify on-chain before marking.
+    const revertMsg = `${resolveErr.message || ''} ${resolveErr.shortMessage || ''}`;
+    if (/already resolved/i.test(revertMsg) || /cannot (be )?resolved before/i.test(revertMsg)) {
+      let resolvedOnChain = false, outcomeOnChain = false;
+      try {
+        [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
+          address: market.contractAddress,
+          abi: MARKET_INFO_ABI,
+          functionName: 'getMarketInfo',
+        });
+      } catch (readErr) {
+        console.warn(`[resolve] ${market.slug} revert-check read failed: ${readErr.message}`);
+        _backoffResolve(market.slug);
+        return false;
+      }
+      if (!resolvedOnChain) {
+        console.warn(`[resolve] ${market.slug} resolve() reverted (${revertMsg.slice(0, 80)}) but chain still unresolved — leaving pending`);
+        _backoffResolve(market.slug);
+        return false;
+      }
+      await _markMarketResolved(market.slug, outcomeOnChain);
+      eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome: outcomeOnChain });
+      console.log(`[resolve] ${market.slug} was already resolved on-chain — marking in cache`);
+      return true;
+    }
+    throw resolveErr; // re-throw real errors
+  }
+
+  await _markMarketResolved(market.slug, outcome);
+  market.resolved = true;
+  market.outcome = outcome;
+  eventBus.safeEmit(EVENTS.MARKET_RESOLVED, { slug: market.slug, outcome });
+  console.log(`Deployed market ${market.slug} resolved successfully.`);
+  return true;
+}
+
+async function checkAndResolveMarkets() {
+  if (_resolutionRunning) {
+    // Boot fires a tick directly while the scheduler arms another, and
+    // MARKET_CREATED can re-arm mid-run. Two concurrent runs would send two
+    // resolve transactions from the same admin account and collide on the nonce.
+    _resolutionHasMoreWork = true;
+    return;
+  }
+  _resolutionRunning = true;
+  const startedAt = Date.now();
+
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const archiveCutoff = now - ARCHIVE_AFTER_DAYS * 24 * 3600;
+
+    const due = [];
+    let backedOff = 0;
+    for (const [slug, entry] of deployedMarketsCache.entries()) {
+      if (entry.deadline >= now || entry.resolved) continue;
+      if (_resolveBackoffActive(slug)) { backedOff++; continue; }
+      due.push({ slug, ...entry });
+    }
+
+    if (due.length === 0) {
+      _resolutionHasMoreWork = false;
+      return; // silent — no spam when nothing to do
+    }
+
+    // Most recently expired first: those are the ones Polymarket is most likely
+    // to have just settled, and the ones users are still looking at.
+    due.sort((a, b) => b.deadline - a.deadline);
+    const batch = due.slice(0, RESOLVE_MAX_PER_TICK);
+    _resolutionHasMoreWork = due.length > batch.length;
+
+    // ── Phase 1: on-chain state for every due market, fanned out ──
+    // Cheap read-only calls, and they let us skip the Gamma lookup entirely for
+    // anything already settled on-chain.
+    const onChain = await pMap(batch, RESOLVE_CONCURRENCY, async (market) => {
+      if (!market.contractAddress) return null;
+      try {
+        const [, , resolvedOnChain, outcomeOnChain] = await publicClient.readContract({
+          address: market.contractAddress,
+          abi: MARKET_INFO_ABI,
+          functionName: 'getMarketInfo',
+        });
+        return { resolvedOnChain, outcomeOnChain };
+      } catch (e) {
+        // RPC might be down — fall through to the Polymarket check.
+        console.warn(`[resolve] on-chain check failed for ${market.slug}: ${e.message}`);
+        return null;
+      }
+    });
+
+    const pending = [];
+    const settledOnChain = [];
+    batch.forEach((market, i) => {
+      const info = onChain[i];
+      if (info?.resolvedOnChain) settledOnChain.push({ market, outcome: info.outcomeOnChain });
+      else pending.push(market);
+    });
+
+    await pMap(settledOnChain, RESOLVE_CONCURRENCY, async ({ market, outcome }) => {
+      await _markMarketResolved(market.slug, outcome);
+      console.log(`[resolve] ${market.slug} already resolved on-chain (${outcome ? 'YES' : 'NO'}) — marked in cache`);
+    });
+
+    // ── Phase 2: one batched Gamma lookup for everything still unresolved ──
+    // Gamma's /markets takes a repeated `slug` parameter, so this is a couple of
+    // requests for the whole tick instead of two per market.
+    const pmBySlug = await fetchMarketsForResolution(pending.map((m) => m.slug))
+      .catch((e) => {
+        console.warn(`[resolve] batched Gamma lookup failed: ${e.message}`);
+        return new Map();
+      });
+
+    // ── Phase 3: writes, strictly serial (one admin account, one nonce) ──
+    let resolvedCount = 0;
+    for (const market of pending) {
+      try {
+        if (await resolveDueMarket(market, pmBySlug.get(market.slug) || null, archiveCutoff)) {
+          resolvedCount++;
+        }
+      } catch (e) {
+        console.error(`Failed to resolve market ${market.slug}:`, e.message);
+        _backoffResolve(market.slug);
+      }
+    }
+
+    console.log(
+      `[resolve] tick: ${batch.length} checked (${backedOff} backed off, ` +
+      `${due.length - batch.length} deferred), ${settledOnChain.length} already on-chain, ` +
+      `${resolvedCount} resolved, ${Date.now() - startedAt}ms`,
+    );
+
+    // ── Post-cron Gamma health check ──
+    // If Gamma API had a cluster of failures during this resolution run, alert
+    // via Sentry so the team knows Polymarket may be down — instead of
+    // discovering it when a user asks why nothing resolved for two days.
+    const gammaFailures = drainConsecutiveFailures();
+    if (gammaFailures >= 5) {
+      const msg = `Gamma API had ${gammaFailures} consecutive failures during resolution cron — Polymarket may be down`;
+      console.error(`[resolve] ${msg}`);
+      captureException(new Error(msg), {
+        cron: 'checkAndResolveMarkets',
+        gammaFailures,
+        marketsChecked: batch.length,
+      });
+    }
+  } finally {
+    _resolutionRunning = false;
   }
 }
 
@@ -5159,7 +5304,11 @@ function scheduleNextMarketResolution() {
   // periodically, not in a tight loop.
   const MIN_RECHECK_MS = 2 * 60 * 1000; // 2 min  faster resolution of past-due markets
   // Cap at 1h so a far-future deadline doesn't hold a stale timer.
-  const cappedDelay = Math.max(MIN_RECHECK_MS, Math.min(delayMs, 60 * 60 * 1000));
+  let cappedDelay = Math.max(MIN_RECHECK_MS, Math.min(delayMs, 60 * 60 * 1000));
+  // A tick is capped at RESOLVE_MAX_PER_TICK markets so one run can't grow
+  // unbounded. When it hit that cap there is known work left, so come straight
+  // back for it instead of idling out the full re-check interval.
+  if (_resolutionHasMoreWork) cappedDelay = 5_000;
   _resolutionTimer = setTimeout(() => {
     _resolutionTimer = null;
     checkAndResolveMarkets().catch(console.error).finally(() => scheduleNextMarketResolution());
