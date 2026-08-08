@@ -37,7 +37,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
-import { createPublicClient, http, parseAbi, parseAbiItem, encodeFunctionData, keccak256, stringToHex, toHex } from 'viem';
+import { createPublicClient, createWalletClient, http, parseAbi, parseAbiItem, encodeFunctionData, keccak256, stringToHex, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arcTestnet } from 'viem/chains';
 
