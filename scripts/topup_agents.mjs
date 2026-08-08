@@ -12,9 +12,14 @@
  *   - POST https://api.circle.com/v1/faucet/drips with the backend's
  *     CIRCLE_API_KEY works for ARBITRARY addresses (unlike the CLI's
  *     `circle wallet fund`, which only funds the agent-account's own wallets).
- *   - Each drip sends 20 USDC (usdc:true, native:false) and the faucet allows
+ *  - Each drip sends 20 USDC (usdc:true, native:false) and the faucet allows
  *     ONE request per address per ~2h (per asset+network pairing). Server-side
  *     enforced; a too-frequent call returns an error we log and skip.
+ *  - The faucet ALSO rate-limits per API key (429 on everything once the
+ *     key's quota is spent). When a drip comes back 429 the script falls back
+ *     to sending TOPUP_FALLBACK_USDC (default 20) from the treasury signer
+ *     (PRIVATE_KEY) via the memo contract — same path as fund_agents.mjs — so
+ *     agents never go dark just because Circle's free faucet is exhausted.
  *
  * Usage:
  *   node scripts/topup_agents.mjs --once          # single pass (Heroku Scheduler / cron)
@@ -32,15 +37,23 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
-import { createPublicClient, http, parseAbi } from 'viem';
+import { createPublicClient, http, parseAbi, parseAbiItem, encodeFunctionData, keccak256, stringToHex, toHex } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { arcTestnet } from 'viem/chains';
 
 const USDC_ADDR = (process.env.USDC_ADDRESS || '0x3600000000000000000000000000000000000000').trim();
 const RPC_URL = (process.env.ARC_PUBLIC_RPC_URL || process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network').trim();
 const FAUCET_URL = 'https://api.circle.com/v1/faucet/drips';
 const BLOCKCHAIN = 'ARC-TESTNET';
+// Memo-contract bankroll sends (same as scripts/fund_agents.mjs) so treasury
+// fallback transfers stay on the intended accounting path.
+const MEMO_CONTRACT = '0x5294E9927c3306DcBaDb03fe70b92e01cCede505';
 
 const MIN_USDC = Math.max(0.5, parseFloat(process.env.TOPUP_MIN_USDC || '2') || 2);
 const INTERVAL_MS = Math.max(5, parseInt(process.env.TOPUP_INTERVAL_MIN || '30', 10)) * 60_000;
+// How much USDC to send per agent when the faucet is rate-limited and we fall
+// back to the treasury signer (PRIVATE_KEY).
+const FALLBACK_USDC = Math.max(1, parseFloat(process.env.TOPUP_FALLBACK_USDC || '20') || 20);
 
 const args = process.argv.slice(2);
 const ONCE = args.includes('--once');
@@ -65,6 +78,15 @@ const circle = initiateDeveloperControlledWalletsClient({
 });
 
 const publicClient = createPublicClient({ transport: http(RPC_URL) });
+const walletClient = process.env.PRIVATE_KEY
+  ? createWalletClient({
+      account: privateKeyToAccount(
+        process.env.PRIVATE_KEY.startsWith('0x') ? process.env.PRIVATE_KEY : `0x${process.env.PRIVATE_KEY}`
+      ),
+      chain: arcTestnet,
+      transport: http(RPC_URL),
+    })
+  : null;
 
 const USDC_ABI = [{
   name: 'balanceOf', type: 'function', stateMutability: 'view',
@@ -117,6 +139,34 @@ async function drip(address) {
   return { ok: false, status: res.status, body: text.slice(0, 300) };
 }
 
+/// Faucet exhausted (429) → send USDC straight from the treasury signer via
+/// the memo contract, same accounting path as scripts/fund_agents.mjs.
+async function treasuryDrip(address, key) {
+  if (!walletClient) return { ok: false, status: 'no-PRIVATE_KEY' };
+  const micro = BigInt(Math.round(FALLBACK_USDC * 1_000_000));
+  try {
+    const innerData = encodeFunctionData({
+      abi: [parseAbiItem('function transfer(address,uint256) returns (bool)')],
+      functionName: 'transfer', args: [address, micro],
+    });
+    const hash = await walletClient.writeContract({
+      address: MEMO_CONTRACT,
+      abi: [{ name: 'memo', type: 'function', stateMutability: 'nonpayable', inputs: [
+        { name: 'target', type: 'address' }, { name: 'data', type: 'bytes' },
+        { name: 'memoId', type: 'bytes32' }, { name: 'memoData', type: 'bytes' }], outputs: [] }],
+      functionName: 'memo',
+      args: [USDC_ADDR, innerData, keccak256(toHex(`bankroll:${key}`)),
+        stringToHex(JSON.stringify({ kind: 'bankroll', agent: key, usdc: FALLBACK_USDC }))],
+    });
+    const rc = await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    return rc.status === 'success'
+      ? { ok: true, status: 200, body: `treasury ${FALLBACK_USDC} USDC (${hash})` }
+      : { ok: false, status: 'tx-failed', body: hash };
+  } catch (e) {
+    return { ok: false, status: 'treasury-error', body: e.message.slice(0, 200) };
+  }
+}
+
 async function topUpOnce() {
   const { rows } = await pool.query(
     `SELECT user_id, wallet_id FROM wallets
@@ -137,9 +187,15 @@ async function topUpOnce() {
     if (balance == null) { report.push({ key: row.user_id, address, status: 'balance-read-failed' }); continue; }
     if (balance < MIN_USDC) {
       const r = await drip(address);
-      const ok = r.dry ? 'dry-run' : (r.ok ? 'dripped' : `failed(${r.status})`);
-      report.push({ key: row.user_id, address, balance: +balance.toFixed(2), action: ok, note: r.body || '' });
-      console.log(`[topup] ${row.user_id} ${address} bal=${balance.toFixed(2)} < ${MIN_USDC} → ${ok}${r.body ? ' ' + r.body : ''}`);
+      let action = r.dry ? 'dry-run' : (r.ok ? 'dripped' : `faucet(${r.status})`);
+      let note = r.body || '';
+      if (!r.dry && !r.ok) {
+        const fb = await treasuryDrip(address, row.user_id.replace(/^agent_/, ''));
+        if (fb.ok) { action += '+treasury'; note = fb.body; }
+        else { action += '+treasury-failed'; note = `${note} | ${fb.status}: ${fb.body}`; }
+      }
+      report.push({ key: row.user_id, address, balance: +balance.toFixed(2), action, note });
+      console.log(`[topup] ${row.user_id} ${address} bal=${balance.toFixed(2)} < ${MIN_USDC} → ${action}${note ? ' ' + note : ''}`);
     } else {
       console.log(`[topup] ${row.user_id} ${address} bal=${balance.toFixed(2)} OK`);
     }
