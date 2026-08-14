@@ -555,6 +555,10 @@ const realSupabase = createClient(
 const NEON_DATABASE_URL = (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL || '').trim();
 
 const supabase = createNeonClient(NEON_DATABASE_URL, realSupabase);
+onShutdown(async () => {
+  try { await supabase.pool?.end(); } catch {}
+  try { await shutdownRedis(); } catch {}
+});
 
 async function pingIndexNow(urls) {
   if (!urls || urls.length === 0) return;
@@ -845,6 +849,75 @@ const publicClient = createPublicClient({
   // deployed on Arc) — the swarm's per-contract position checks were
   // tripping the node's rate limit ("Request exceeds defined limit").
   batch: { multicall: true }
+});
+
+const MARKET_INFO_ABI = [
+  {
+    name: 'getMarketInfo',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [
+      { name: '_slug', type: 'string' },
+      { name: '_deadline', type: 'uint256' },
+      { name: '_resolved', type: 'bool' },
+      { name: '_outcome', type: 'bool' },
+      { name: '_yesOutstanding', type: 'uint256' },
+      { name: '_noOutstanding', type: 'uint256' },
+    ],
+  },
+];
+
+const _marketInfoCache = new Map();
+const MARKET_INFO_TTL_MS = 15_000;
+
+async function getMarketInfoCached(address) {
+  if (!address || typeof address !== 'string' || !address.startsWith('0x')) return null;
+  const key = address.toLowerCase();
+  const now = Date.now();
+  const cached = _marketInfoCache.get(key);
+
+  if (cached?.info) {
+    const isResolved = Boolean(cached.info[2]);
+    if (isResolved || (now - cached.at < MARKET_INFO_TTL_MS)) {
+      return cached.info;
+    }
+  }
+
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  const readPromise = (async () => {
+    try {
+      const res = await publicClient.readContract({
+        address,
+        abi: MARKET_INFO_ABI,
+        functionName: 'getMarketInfo',
+      });
+      _marketInfoCache.set(key, { info: res, at: Date.now(), promise: null });
+      return res;
+    } catch (err) {
+      if (cached?.info) return cached.info;
+      throw err;
+    } finally {
+      const entry = _marketInfoCache.get(key);
+      if (entry) entry.promise = null;
+    }
+  })();
+
+  _marketInfoCache.set(key, { info: cached?.info || null, at: cached?.at || 0, promise: readPromise });
+  return readPromise;
+}
+
+// Invalidate market info cache when trade or resolution happens
+eventBus.on(EVENTS.TRADE_COMPLETE, (t) => {
+  const addr = t?.market_id || t?.market_address;
+  if (addr && typeof addr === 'string') _marketInfoCache.delete(addr.toLowerCase());
+});
+eventBus.on(EVENTS.MARKET_RESOLVED, (evt) => {
+  const addr = evt?.contract_address;
+  if (addr && typeof addr === 'string') _marketInfoCache.delete(addr.toLowerCase());
 });
 
 const adminPrivateKey = process.env.PRIVATE_KEY ? process.env.PRIVATE_KEY.trim() : null;
@@ -2494,29 +2567,12 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
         outcome = cached.outcome;
         
         try {
-          const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = await publicClient.readContract({
-            address: contractAddress,
-            abi: [
-              {
-                name: 'getMarketInfo',
-                type: 'function',
-                stateMutability: 'view',
-                inputs: [],
-                outputs: [
-                  { name: '_slug', type: 'string' },
-                  { name: '_deadline', type: 'uint256' },
-                  { name: '_resolved', type: 'bool' },
-                  { name: '_outcome', type: 'bool' },
-                  { name: '_yesOutstanding', type: 'uint256' },
-                  { name: '_noOutstanding', type: 'uint256' }
-                ]
-              }
-            ],
-            functionName: 'getMarketInfo'
-          });
-
-          poolYes = Number(yesOutstanding) / 1_000_000;
-          poolNo = Number(noOutstanding) / 1_000_000;
+          const info = await getMarketInfoCached(contractAddress);
+          if (info) {
+            const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = info;
+            poolYes = Number(yesOutstanding) / 1_000_000;
+            poolNo = Number(noOutstanding) / 1_000_000;
+          }
           
           const bVal = 10;
           const maxQ = Math.max(poolYes, poolNo);
@@ -2641,26 +2697,9 @@ app.get('/api/market/info', async (req, res) => {
     if (!cached) return res.status(404).json({ error: 'Market not deployed' });
     const contractAddress = cached.contractAddress;
     
-    const [slugOnChain, deadline, resolved, outcome, yesOutstanding, noOutstanding] = await publicClient.readContract({
-      address: contractAddress,
-      abi: [
-        {
-          name: 'getMarketInfo',
-          type: 'function',
-          stateMutability: 'view',
-          inputs: [],
-          outputs: [
-            { name: '_slug', type: 'string' },
-            { name: '_deadline', type: 'uint256' },
-            { name: '_resolved', type: 'bool' },
-            { name: '_outcome', type: 'bool' },
-            { name: '_yesOutstanding', type: 'uint256' },
-            { name: '_noOutstanding', type: 'uint256' }
-          ]
-        }
-      ],
-      functionName: 'getMarketInfo'
-    });
+    const info = await getMarketInfoCached(contractAddress);
+    if (!info) return res.status(500).json({ error: 'Failed to read market info' });
+    const [slugOnChain, deadline, resolved, outcome, yesOutstanding, noOutstanding] = info;
 
     const poolYesVal = Number(yesOutstanding) / 1_000_000;
     const poolNoVal = Number(noOutstanding) / 1_000_000;
@@ -4984,18 +5023,6 @@ function _resolveBackoffActive(slug) {
   return true;
 }
 
-const MARKET_INFO_ABI = [{
-  name: 'getMarketInfo', type: 'function', stateMutability: 'view', inputs: [],
-  outputs: [
-    { name: '_slug', type: 'string' },
-    { name: '_deadline', type: 'uint256' },
-    { name: '_resolved', type: 'bool' },
-    { name: '_outcome', type: 'bool' },
-    { name: '_yesOutstanding', type: 'uint256' },
-    { name: '_noOutstanding', type: 'uint256' },
-  ],
-}];
-
 /** Mark a market resolved in the in-memory cache + Supabase. */
 async function _markMarketResolved(slug, outcome) {
   const entry = deployedMarketsCache.get(slug);
@@ -5541,34 +5568,18 @@ async function updateLeaderboard() {
           } else {
             if (cached) {
               try {
-                const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = await publicClient.readContract({
-                  address: marketAddress,
-                  abi: [{
-                    name: 'getMarketInfo',
-                    type: 'function',
-                    stateMutability: 'view',
-                    inputs: [],
-                    outputs: [
-                      { name: '_slug', type: 'string' },
-                      { name: '_deadline', type: 'uint256' },
-                      { name: '_resolved', type: 'bool' },
-                      { name: '_outcome', type: 'bool' },
-                      { name: '_yesOutstanding', type: 'uint256' },
-                      { name: '_noOutstanding', type: 'uint256' }
-                    ]
-                  }],
-                  functionName: 'getMarketInfo'
-    });
-
-                
-                const poolYes = Number(yesOutstanding) / 1_000_000;
-                const poolNo = Number(noOutstanding) / 1_000_000;
-                const bVal = 10;
-                const maxQ = Math.max(poolYes, poolNo);
-                const expYes = Math.exp((poolYes - maxQ) / bVal);
-                const expNo = Math.exp((poolNo - maxQ) / bVal);
-                yesPrice = expYes / (expYes + expNo);
-                noPrice = expNo / (expYes + expNo);
+                const info = await getMarketInfoCached(marketAddress);
+                if (info) {
+                  const [slugOnChain, deadlineOnChain, resolvedOnChain, outcomeOnChain, yesOutstanding, noOutstanding] = info;
+                  const poolYes = Number(yesOutstanding) / 1_000_000;
+                  const poolNo = Number(noOutstanding) / 1_000_000;
+                  const bVal = 10;
+                  const maxQ = Math.max(poolYes, poolNo);
+                  const expYes = Math.exp((poolYes - maxQ) / bVal);
+                  const expNo = Math.exp((poolNo - maxQ) / bVal);
+                  yesPrice = expYes / (expYes + expNo);
+                  noPrice = expNo / (expYes + expNo);
+                }
               } catch (e) {
                 // Keep default 0.5
               }
