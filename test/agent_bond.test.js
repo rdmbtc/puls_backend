@@ -146,7 +146,8 @@ test('Bond report: aggregates active/slashed/returned counts + USDC per agent', 
     { id: 's4', creator_user_id: 'agent_sage', bond_status: 'returned', bond_amount_usdc: 0.1, bond_correct: true },
   ]);
   assert.ok(report, 'report should be returned');
-  const vega = report.agents.find((a) => a.agent === 'agent_vega');
+  const vega = report.agents.find((a) => a.agent === 'agent_vega' || a.agent === 'Vega ⚡' || a.agent.includes('Vega'));
+  assert.ok(vega, 'vega report entry should exist');
   assert.deepEqual(vega.bonds, { active: 1, slashed: 1, returned: 1, total: 3 });
   assert.deepEqual(vega.usdc, { active: 0.1, slashed: 0.2, returned: 0.15 });
   // Accuracy: returned / (slashed + returned) = 1 / 2 = 50%

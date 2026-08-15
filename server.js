@@ -4115,6 +4115,11 @@ const streamsApi = registerStreaming(app, {
   strictLimiter,
   awardPoints,
 });
+if (typeof streamsApi?.flushOnShutdown === 'function') {
+  onShutdown(async () => {
+    try { await streamsApi.flushOnShutdown(); } catch {}
+  });
+}
 
 //  Comments (community layer, F1) 
 // Signed-in users comment on markets/profiles/events/alpha, reply (one level)
@@ -4291,7 +4296,7 @@ registerLepton(app, {
 //  x402 Bazaar  the first x402 discovery registry on Arc Testnet 
 // Public catalog + hybrid search of paid endpoints, each paying via Circle
 // Gateway. Discovery is free; the data behind each service is paid.
-registerBazaar(app);
+registerBazaar(app, { supabase });
 
 //  x402 Markets  buy a live market-data snapshot for $0.01 
 registerX402Markets(app, {
