@@ -5991,11 +5991,11 @@ app.post('/api/profile/update', authenticateUser, strictLimiter, async (req, res
 // appended automatically when missing. All keys live in .env, never in the repo.
 function buildLlmProviders(base = 'AGENT_LLM', modelBase = 'AGENT_MODEL') {
   const list = [];
-  // '', _2  _50  room for many fallback providers and rotating keys.
-  for (const sfx of ['', ...Array.from({ length: 49 }, (_, i) => `_${i + 2}`)]) {
+  // '', _2 … _100 — room for many fallback providers and rotating keys.
+  for (const sfx of ['', ...Array.from({ length: 99 }, (_, i) => `_${i + 2}`)]) {
     let url = (process.env[`${base}_URL${sfx}`] || '').trim();
     const key = (process.env[`${base}_KEY${sfx}`] || '').trim();
-    const model = (process.env[`${modelBase}${sfx}`] || '').trim();
+    const model = (process.env[`${modelBase}${sfx}`] || process.env[`${base}_MODEL${sfx}`] || '').trim();
     if (!url || !key || !model) continue;
     // Format: explicit env wins, else auto-detect by host.
     let format = (process.env[`${base}_FORMAT${sfx}`] || '').trim().toLowerCase();
