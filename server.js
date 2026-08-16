@@ -461,6 +461,54 @@ const authenticateUser = async (req, res, next) => {
   }
 };
 
+// Optional auth: decodes token if present to populate req.user / userId, but allows guest access
+const optionalAuth = async (req, res, next) => {
+  try {
+    let token = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.query?.auth_token) {
+      token = req.query.auth_token;
+    } else if (req.body?.auth_token) {
+      token = req.body.auth_token;
+    }
+    if (!token) return next();
+
+    let user = null;
+    try {
+      const { data } = await supabaseAnon.auth.getUser(token);
+      if (data?.user) user = data.user;
+    } catch (_) {}
+
+    if (!user && token) {
+      try {
+        const parts = token.split('.');
+        if (parts.length >= 2) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          if (payload.sub && payload.exp && payload.exp > (Date.now() / 1000)) {
+            user = {
+              id: payload.sub,
+              email: payload.email,
+              user_metadata: payload.user_metadata || {},
+            };
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (user) {
+      req.user = user;
+      const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_')))
+        ? user.id
+        : `supabase_${user.id}`;
+      if (req.query) req.query.userId = expectedUserId;
+      if (req.body) req.body.userId = expectedUserId;
+    }
+  } catch (_) {}
+  next();
+};
+
 
 // Rejects unverified web3 guests (see authenticateUser). Apply to every endpoint
 // that operates a Circle developer-controlled wallet or spends server resources
