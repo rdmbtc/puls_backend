@@ -3297,7 +3297,18 @@ app.get('/api/trade/recent', async (req, res) => {
       .limit(Math.max(limitNum, 50)); // fetch more than needed for cache hit
 
     if (marketId) {
-      query = query.eq('market_id', marketId).limit(limitNum);
+      const ids = String(marketId).split(',').map((s) => s.trim()).filter(Boolean);
+      if (ids.length === 1) {
+        const m = ids[0];
+        if (m.startsWith('0x')) {
+          query = query.ilike('market_id', m).limit(limitNum);
+        } else {
+          query = query.or(`market_id.eq.${m},market_id.ilike.${m}`).limit(limitNum);
+        }
+      } else {
+        const orClauses = ids.map((id) => id.startsWith('0x') ? `market_id.ilike.${id}` : `market_id.eq.${id}`).join(',');
+        query = query.or(orClauses).limit(limitNum);
+      }
     }
 
     const { data, error } = await query;
@@ -4129,6 +4140,7 @@ if (typeof streamsApi?.flushOnShutdown === 'function') {
 registerComments(app, {
   supabase,
   authenticateUser,
+  optionalAuth,
   requireVerifiedUser,
   strictLimiter,
   createNotification,
