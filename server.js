@@ -3329,34 +3329,54 @@ let _recentTradesCache = { data: null, ts: 0 };
 const RECENT_TRADES_TTL_MS = 3000; // 3s  fresh enough for live feed
 app.get('/api/trade/recent', async (req, res) => {
   try {
-    const { limit = 20, marketId } = req.query;
+    const { limit = 20, marketId, question } = req.query;
     const limitNum = Math.min(100, parseInt(limit) || 20);
 
-    // Use cache for the default (no marketId) case  avoids hitting Supabase
-    // on every poll. When marketId is specified, skip cache (different query).
-    if (!marketId && _recentTradesCache.data && Date.now() - _recentTradesCache.ts < RECENT_TRADES_TTL_MS) {
-      return res.json(_recentTradesCache.data.slice(0, limitNum));
+    let candidateIds = [];
+    if (marketId) {
+      candidateIds = String(marketId).split(',').map((s) => s.trim()).filter(Boolean);
+    }
+
+    // Try resolving deployed_markets by candidate slugs
+    for (const id of [...candidateIds]) {
+      if (!id.startsWith('0x')) {
+        try {
+          const { data: dep } = await supabase
+            .from('deployed_markets')
+            .select('contract_address')
+            .eq('slug', id)
+            .maybeSingle();
+          if (dep?.contract_address && !candidateIds.includes(dep.contract_address)) {
+            candidateIds.push(dep.contract_address);
+          }
+        } catch (_) {}
+      }
     }
 
     let query = supabase
       .from('trades')
       .select('*')
-      .order('created_at', { ascending: false })
-      .limit(Math.max(limitNum, 50)); // fetch more than needed for cache hit
+      .order('created_at', { ascending: false });
 
-    if (marketId) {
-      const ids = String(marketId).split(',').map((s) => s.trim()).filter(Boolean);
-      if (ids.length === 1) {
-        const m = ids[0];
-        if (m.startsWith('0x')) {
-          query = query.ilike('market_id', m).limit(limitNum);
-        } else {
-          query = query.or(`market_id.eq.${m},market_id.ilike.${m}`).limit(limitNum);
+    if (candidateIds.length > 0) {
+      const orClauses = candidateIds.map((id) =>
+        id.startsWith('0x') ? `market_id.ilike.${id}` : `market_id.eq.${id}`
+      );
+      if (question) {
+        const cleanQ = String(question).replace(/^Agent:\s*/i, '').trim();
+        if (cleanQ.length > 5) {
+          orClauses.push(`question.ilike.%${cleanQ.slice(0, 50)}%`);
         }
-      } else {
-        const orClauses = ids.map((id) => id.startsWith('0x') ? `market_id.ilike.${id}` : `market_id.eq.${id}`).join(',');
-        query = query.or(orClauses).limit(limitNum);
       }
+      query = query.or(orClauses.join(',')).limit(limitNum);
+    } else if (question) {
+      const cleanQ = String(question).replace(/^Agent:\s*/i, '').trim();
+      query = query.ilike('question', `%${cleanQ.slice(0, 50)}%`).limit(limitNum);
+    } else {
+      if (_recentTradesCache.data && Date.now() - _recentTradesCache.ts < RECENT_TRADES_TTL_MS) {
+        return res.json(_recentTradesCache.data.slice(0, limitNum));
+      }
+      query = query.limit(Math.max(limitNum, 50));
     }
 
     const { data, error } = await query;
@@ -3365,8 +3385,8 @@ app.get('/api/trade/recent', async (req, res) => {
       console.error('Error fetching recent trades:', error.message);
       return res.status(500).json({ error: error.message });
     }
-    // Cache the result (only for the no-marketId default path).
-    if (!marketId) {
+    // Cache the result (only for the no-filter default path).
+    if (!marketId && !question) {
       _recentTradesCache = { data: data ?? [], ts: Date.now() };
     }
     res.json(data ?? []);
@@ -3644,6 +3664,7 @@ async function generateMarketInsight(slug) {
   // 15s total timeout to beat Heroku H12 / 30s router limit
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const ctx = { slug, question: null, description: '', yesPrice: null, endDate: null, volume: null, change24h: null };
   try {
     const arr = await fetchGamma(`/markets?slug=${encodeURIComponent(slug)}`);
     const m = Array.isArray(arr) ? arr[0] : null;
