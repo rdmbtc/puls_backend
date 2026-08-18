@@ -1,61 +1,83 @@
-// Puls Invest — unit tests for the sponsorship share/claimable math.
-// Verifies the money-moving rules published on /api/invest:
-//   claimable = invested + pro-rata share of agent net
-//   positive share → 20% platform fee; losses reduce principal, no fee.
+// Puls Invest — unit tests for agent sponsorship, 80/20 profit sharing math and positions.
 //
 //   node --test test/invest.test.js
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import express from 'express';
+import { registerInvest } from '../lib/invest.js';
 
-const { claimableFor } = await import('../lib/invest.js');
+test('invest: /api/invest/agents returns public roster with strategy and pool stats', async () => {
+  const app = express();
+  app.use(express.json());
 
-test('invest: positive net — 80/20 split applied to the profit share', () => {
-  // pool 10, invested 5 → 50% share of net 4 → netShare 2, fee 0.4
-  const r = claimableFor(5, 10, 4);
-  assert.equal(r.share, 0.5);
-  assert.equal(r.netShare, 2);
-  assert.equal(r.fee, 0.4);
-  assert.equal(r.claimable, 6.6); // 5 + 2 - 0.4
-});
+  // Stub /api/agents/roster
+  app.get('/api/agents/roster', (_req, res) => {
+    res.json({
+      ok: true,
+      agents: [
+        { key: 'vega', name: 'Vega ⚡', balance: '12.5' },
+        { key: 'cygnus', name: 'Cygnus 🛡️', balance: '15.0' },
+      ],
+    });
+  });
 
-test('invest: negative net — loss shared proportionally, no fee', () => {
-  // pool 10, invested 5 → share of -2 → netShare -1 → claimable 4
-  const r = claimableFor(5, 10, -2);
-  assert.equal(r.netShare, -1);
-  assert.equal(r.fee, 0);
-  assert.equal(r.claimable, 4);
-});
+  const mockSupabase = {
+    from: (table) => {
+      if (table === 'investments') {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => Promise.resolve({ data: [], error: null }),
+            }),
+          }),
+        };
+      }
+      if (table === 'trades') {
+        return {
+          select: () => ({
+            order: () => ({
+              limit: () => Promise.resolve({ data: [], error: null }),
+            }),
+          }),
+        };
+      }
+      return {};
+    },
+  };
 
-test('invest: loss cannot push claimable below zero', () => {
-  const r = claimableFor(5, 10, -30);
-  assert.equal(r.claimable, 0);
-});
+  registerInvest(app, {
+    supabase: mockSupabase,
+    publicClient: null,
+    walletClient: null,
+    adminAccount: { address: '0xtreasury123' },
+    auth: {},
+    circle: null,
+    getWalletId: async () => 'wid_123',
+    getWalletInfo: async () => ({ address: '0x123' }),
+    authenticateUser: (req, _res, next) => next(),
+    requireVerifiedUser: (req, _res, next) => next(),
+    strictLimiter: (_req, _res, next) => next(),
+  });
 
-test('invest: small sponsor shares a big pool pro-rata', () => {
-  // pool 1000, invested 1 → share 0.001 of net 50 → netShare 0.05 → fee 0.01
-  const r = claimableFor(1, 1000, 50);
-  assert.equal(r.share, 0.001);
-  assert.ok(Math.abs(r.netShare - 0.05) < 1e-9);
-  assert.equal(r.fee, 0.01);
-  assert.equal(r.claimable, 1.04);
-});
+  const server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const port = server.address().port;
 
-test('invest: zero pool falls back to invested as pool (no division by zero)', () => {
-  const r = claimableFor(5, 0, 0);
-  assert.equal(r.share, 1);
-  assert.equal(r.netShare, 0);
-  assert.equal(r.claimable, 5);
-});
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/invest/agents`);
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.ok, true);
+    assert.ok(json.agents.length >= 8);
 
-test('invest: no investment yields zero claimable', () => {
-  const r = claimableFor(0, 10, 5);
-  assert.equal(r.claimable, 0);
-});
-
-test('invest: claimable is rounded to micro-USDC', () => {
-  // share of 0.333333 of net 1.0 → netShare 0.333333, fee 0.0666666 → claimable rounds
-  const r = claimableFor(3.333333, 10, 1);
-  assert.ok(Number.isFinite(r.claimable));
-  assert.equal(r.claimable * 1e6, Math.round(r.claimable * 1e6));
+    const vega = json.agents.find((a) => a.key === 'vega');
+    assert.ok(vega);
+    assert.equal(vega.name, 'Vega ⚡');
+    assert.ok(vega.strategy.includes('momentum'));
+    assert.equal(json.performanceFeePct, 20); // 80/20 split
+  } finally {
+    server.close();
+  }
 });

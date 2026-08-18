@@ -8138,9 +8138,83 @@ const io = initSocketIo(server);
 // WS, not Socket.IO. Keep them working; they consume TRADE_COMPLETE frames.
 const rawWs = initRawWs(server);
 
+// ── GET /api/trade/stream — Real-time Server-Sent Events (SSE) stream ────────
+// Broadcasts live trades, comments, and duels to connected Flutter & web clients.
+const sseClients = new Set();
+
+app.get('/api/trade/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const clientId = `client_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  res.write(`event: connected\ndata: ${JSON.stringify({ ok: true, clientId, ts: Date.now() })}\n\n`);
+
+  const client = { id: clientId, res };
+  sseClients.add(client);
+
+  const pingInterval = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch (_) {
+      clearInterval(pingInterval);
+      sseClients.delete(client);
+    }
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(pingInterval);
+    sseClients.delete(client);
+  });
+});
+
+function broadcastSse(eventType, payload) {
+  if (!sseClients.size) return;
+  const msg = `event: ${eventType}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.res.write(msg);
+    } catch (_) {
+      sseClients.delete(client);
+    }
+  }
+}
+
+// Wire internal events to SSE stream
+eventBus.on(EVENTS.TRADE_COMPLETE, (trade) => {
+  broadcastSse('trade', {
+    type: 'trade',
+    id: trade?.tx_id || trade?.id,
+    userId: trade?.user_id,
+    side: trade?.side,
+    amount: trade?.usdc_amount,
+    question: trade?.question,
+    marketId: trade?.market_id,
+    entryPrice: trade?.entry_price,
+    txHash: trade?.tx_hash,
+    createdAt: trade?.created_at || new Date().toISOString(),
+  });
+});
+
+eventBus.on(EVENTS.COMMENT_CREATED, (comment) => {
+  broadcastSse('comment', {
+    type: 'comment',
+    id: comment?.id,
+    userId: comment?.user_id,
+    targetType: comment?.target_type,
+    targetId: comment?.target_id,
+    body: comment?.body,
+    parentId: comment?.parent_id,
+    isDuel: /⚔️|\[Duel/i.test(comment?.body || ''),
+    createdAt: comment?.created_at || new Date().toISOString(),
+  });
+});
+
 function broadcastTrade(trade) {
   // Fan out to the internal event bus  cache + agents + Socket.IO gateway
-  // + raw `ws` gateway all react. broadcastTrade is only called for COMPLETE
+  // + raw `ws` gateway + SSE stream all react. broadcastTrade is only called for COMPLETE
   // trades, so the bus event is TRADE_COMPLETE.
   eventBus.safeEmit(EVENTS.TRADE_COMPLETE, trade);
   console.log(`[broadcast] trade event: ${trade.id}`);
