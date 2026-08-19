@@ -39,6 +39,8 @@ import { registerLepton } from './lib/lepton.js';
 import { registerX402Markets } from './lib/x402_markets.js';
 import { registerBazaar } from './lib/bazaar.js';
 import { registerInvest } from './lib/invest.js';
+import { registerNewsCreatorRoutes } from './lib/news_creator.js';
+import { registerGatewayRoutes } from './lib/gateway_deposit.js';
 import { registerPoints } from './lib/points.js';
 import { registerApiKeys, resolveApiKey } from './lib/api_keys.js';
 import { resolvePositionalMarket, resolvePositionalSignal } from './lib/agent_chat_helpers.js';
@@ -4427,6 +4429,9 @@ registerInvest(app, {
   requireVerifiedUser,
   strictLimiter,
 });
+
+registerNewsCreatorRoutes(app, { supabase });
+registerGatewayRoutes(app);
 
 // /health  quick liveness probe (returns 200 immediately). Use for
 // Heroku's restart-on-failure check + uptime monitors that just need "up?".
