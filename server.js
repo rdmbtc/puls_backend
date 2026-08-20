@@ -90,8 +90,11 @@ process.on('uncaughtException', (err, origin) => {
   console.error('[UNCAUGHT EXCEPTION]', origin, msg);
   if (err?.stack) console.error(err.stack);
   captureException(err instanceof Error ? err : new Error(msg));
-  // Do NOT exit  log and continue. Heroku will restart if the process
-  // truly becomes unresponsive, but we give it a chance to recover.
+  // SECURITY/STABILITY (H2 fix): After an uncaught exception the process state
+  // is unknown — timers, connections, and in-flight operations may be corrupted.
+  // Continuing risks silent data corruption (e.g. trades against wrong state).
+  // Exit so Heroku restarts cleanly. Give Sentry a moment to flush first.
+  setTimeout(() => process.exit(1), 2000);
 });
 
 // ── Graceful Shutdown ─────────────────────────────────────────────────────
@@ -245,7 +248,9 @@ app.use(cors({
     ) {
       return callback(null, true);
     }
-    return callback(null, true);
+    // SECURITY (C2 fix): Actually REJECT disallowed origins instead of
+    // falling through to callback(null, true) which allowed everything.
+    return callback(new Error('CORS not allowed'), false);
   },
   credentials: true,
   // Expose x402 payment headers so browser clients (Vercel web app, Flutter
@@ -355,6 +360,22 @@ app.use((req, res, next) => {
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
+// H1 fix: Centralized safe error response. In production, never send internal
+// error details (e.message, stack fragments) to the client — they leak DB
+// connection strings, SDK internals, and file paths. The global error handler
+// already does this, but many route catch blocks send their own response
+// before the global handler runs. This helper ensures consistent behavior.
+const IS_PROD = process.env.NODE_ENV === 'production';
+function safeErrorResponse(res, err, status = 500) {
+  const msg = err?.message || String(err);
+  if (!IS_PROD) console.error(`[route error] ${msg}`);
+  if (!res.headersSent) {
+    res.status(status).json({
+      error: IS_PROD ? 'Internal server error' : msg,
+    });
+  }
+}
+
 // Supabase JWT Authenticate Middleware
 const authenticateUser = async (req, res, next) => {
   try {
@@ -418,24 +439,10 @@ const authenticateUser = async (req, res, next) => {
       console.warn('[Auth Middleware] Supabase getUser network error, trying local JWT decode:', e.message);
     }
 
-    if (!user && token) {
-      try {
-        const parts = token.split('.');
-        if (parts.length >= 2) {
-          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-          if (payload.sub && payload.exp && payload.exp > (Date.now() / 1000)) {
-            user = {
-              id: payload.sub,
-              email: payload.email,
-              user_metadata: payload.user_metadata || {}
-            };
-          }
-        }
-      } catch (e) {
-        console.error('[Auth Middleware] JWT fallback decode failed:', e.message);
-      }
-    }
-
+    // SECURITY (C1 fix): Do NOT fall back to local JWT decoding without signature
+    // verification. A forged JWT with any sub/exp is trivially crafted, which
+    // would allow full identity impersonation. If Supabase can't verify the
+    // token (network error, invalid signature), the request is rejected.
     if (!user) {
       return res.status(401).json({ error: 'Unauthorized: Invalid token' });
     }
@@ -483,22 +490,8 @@ const optionalAuth = async (req, res, next) => {
       if (data?.user) user = data.user;
     } catch (_) {}
 
-    if (!user && token) {
-      try {
-        const parts = token.split('.');
-        if (parts.length >= 2) {
-          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-          if (payload.sub && payload.exp && payload.exp > (Date.now() / 1000)) {
-            user = {
-              id: payload.sub,
-              email: payload.email,
-              user_metadata: payload.user_metadata || {},
-            };
-          }
-        }
-      } catch (_) {}
-    }
-
+    // SECURITY (C1 fix): No local JWT decode fallback — signature must be
+    // verified by Supabase. If verification fails, user stays null (guest).
     if (user) {
       req.user = user;
       const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_')))
@@ -835,7 +828,7 @@ app.post('/api/auth/refresh', async (req, res) => {
     res.json({ token: newToken, userId: payload.sub });
   } catch (e) {
     console.error('[auth/refresh] error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2142,7 +2135,7 @@ app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictL
     }
   } catch (e) {
     console.error('get-or-create:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2275,7 +2268,7 @@ app.get('/api/wallet/balance', apiKeyOrAuth, async (req, res) => {
     const info = await getWalletInfo(walletId);
     res.json({ usdcBalance: info.usdcBalance });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2344,7 +2337,7 @@ app.post('/api/wallet/withdraw', authenticateUser, requireVerifiedUser, strictLi
     });
   } catch (e) {
     console.error('[withdraw] error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2364,7 +2357,7 @@ app.get('/api/wallet/export', authenticateUser, requireVerifiedUser, strictLimit
       note: 'Circle MPC wallet. Private key managed by Circle.',
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2703,7 +2696,7 @@ app.get('/api/markets', cacheMiddleware(30, 'v1'), async (req, res) => {
     res.json(filteredList);
   } catch (e) {
     console.error('/api/markets error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2733,7 +2726,7 @@ app.post('/api/market/activate', activateMarketLimiter, async (req, res) => {
     res.json({ contractAddress });
   } catch (e) {
     console.error('activate market error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2776,7 +2769,7 @@ app.get('/api/market/info', async (req, res) => {
     });
   } catch (e) {
     console.error('getMarketInfo:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2836,7 +2829,7 @@ app.get('/api/market/resolution-status', async (req, res) => {
     return res.json({ ...base, mode: 'direct' });
   } catch (e) {
     console.error('resolution-status error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2879,7 +2872,7 @@ app.get('/api/market/price-history', async (req, res) => {
     res.json({ slug, contractAddress: cached.contractAddress, hours, points });
   } catch (e) {
     console.error('price-history error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -2905,6 +2898,12 @@ app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asyn
 
     const isYes = side === 'YES';
     const amount = parseFloat(usdcAmount);
+    // SECURITY (H3 fix): Validate amount is a positive finite number within a
+    // sane per-trade cap. Prevents negative/zero/NaN amounts reaching the
+    // on-chain contract and Circle SDK.
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000) {
+      return res.status(400).json({ error: 'Invalid trade amount. Must be between $0.01 and $1000.' });
+    }
     const amountMicro = Math.round(amount * 1_000_000).toString();
 
     const info = await getWalletInfo(walletId);
@@ -3002,7 +3001,7 @@ app.post('/api/trade/buy', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asyn
     res.json({ txId, state: txRes.data.state, side, balance: info.usdcBalance });
   } catch (e) {
     console.error('trade buy error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3055,7 +3054,7 @@ app.post('/api/trade/sell', apiKeyOrAuth, requireVerifiedUser, tradeLimiter, asy
     res.json({ txId, state: txRes.data.state, side });
   } catch (e) {
     console.error('sell trade error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3137,7 +3136,7 @@ app.post('/api/trade/claim-all', apiKeyOrAuth, requireVerifiedUser, strictLimite
     res.json({ ok: true, claimed: claimed.length, items: claimed });
   } catch (e) {
     console.error('claim-all error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3227,7 +3226,7 @@ app.post('/api/trade/claim', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
 
   } catch (e) {
     console.error('claim error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3269,7 +3268,7 @@ app.get('/api/trade/status', async (req, res) => {
     }
     res.json({ txId: txRes.data.id, state: tx.state, txHash: tx.txHash });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3321,7 +3320,7 @@ app.post('/api/trade/save-external', tradeLimiter, async (req, res) => {
     });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3394,7 +3393,7 @@ app.get('/api/trade/recent', async (req, res) => {
     res.json(data ?? []);
   } catch (e) {
     console.error('recent trades error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3635,7 +3634,7 @@ app.get('/api/portfolio', apiKeyOrAuth, async (req, res) => {
     
     res.json({ positions, totalSpent });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3817,7 +3816,7 @@ function quantInsight(slug, ctx) {
   } catch (e) {
     clearTimeout(timer);
     console.error('insight error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3895,7 +3894,7 @@ app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
     res.json(data);
   } catch (e) {
     console.error('stats error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -3943,7 +3942,7 @@ app.get('/api/live', async (req, res) => {
     res.json(data);
   } catch (e) {
     console.error('live error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -4546,7 +4545,7 @@ app.get('/api/og/market/:slug', async (req, res) => {
     res.set('Cache-Control', 'public, max-age=300');
     res.send(svg);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -4598,7 +4597,7 @@ app.post('/api/trade/claim-external', tradeLimiter, async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('claim-external error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -4652,10 +4651,10 @@ app.get('/health/deep', async (_req, res) => {
 //
 // Rollout safety: verification is ATTEMPTED on every request, but it is only
 // ENFORCED (request rejected on failure/missing signature) when
-// CIRCLE_WEBHOOK_ENFORCE=true. Default is off so an unverified-but-legitimate
-// webhook can't silently stop trade-state updates during the demo  flip it on
-// once you've confirmed signatures verify in the logs.
-const CIRCLE_WEBHOOK_ENFORCE = (process.env.CIRCLE_WEBHOOK_ENFORCE || 'false').toLowerCase() === 'true';
+// CIRCLE_WEBHOOK_ENFORCE=true. SECURITY (C4 fix): Default is now ON so forged
+// webhook payloads can't update trade state. Set CIRCLE_WEBHOOK_ENFORCE=false
+// ONLY for initial setup/testing, never in production.
+const CIRCLE_WEBHOOK_ENFORCE = (process.env.CIRCLE_WEBHOOK_ENFORCE || 'true').toLowerCase() === 'true';
 const circlePublicKeyCache = new Map(); // keyId -> crypto.KeyObject
 
 async function getCirclePublicKey(keyId) {
@@ -4962,7 +4961,7 @@ app.post('/api/webhook/quicknode', async (req, res) => {
     res.status(200).json({ ok: true });
   } catch (err) {
     console.error(`[QuickNode Webhook] Error handling request:`, err.message);
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err);
   }
 });
 
@@ -5011,7 +5010,7 @@ app.post('/api/market/resolve', authenticateUser, requireVerifiedUser, requireAd
     res.json({ txId: txRes.data.id, state: txRes.data.state });
   } catch (e) {
     console.error('resolve error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -5805,7 +5804,7 @@ app.get('/api/refresh-leaderboard', async (req, res) => {
     await updateLeaderboard();
     res.json({ ok: true, message: 'Leaderboard updated' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -5966,7 +5965,7 @@ app.get('/api/leaderboard', cacheMiddleware(60, 'v1'), async (req, res) => {
     
     res.json(formatted);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -6032,7 +6031,7 @@ app.get('/api/profile/:userId', async (req, res) => {
       trades
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -6069,7 +6068,7 @@ app.post('/api/profile/update', authenticateUser, strictLimiter, async (req, res
     }
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -6589,7 +6588,7 @@ app.post('/api/agent/start', apiKeyOrAuth, requireVerifiedUser, strictLimiter, a
     });
   } catch (e) {
     console.error('agent start error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -6606,7 +6605,7 @@ app.get('/api/agent/status', apiKeyOrAuth, requireVerifiedUser, async (req, res)
       reputation: agentRepCount.get(`agent_${req.query.userId}`) ?? 0,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -6644,7 +6643,7 @@ app.post('/api/agent/deposit', authenticateUser, requireVerifiedUser, strictLimi
     res.json({ deposited: ok ? amt : 0, balance });
   } catch (e) {
     console.error('agent deposit error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -6685,7 +6684,7 @@ app.post('/api/agent/withdraw', authenticateUser, requireVerifiedUser, strictLim
     res.json({ withdrawn: withdrawAmt, txId: tx.data?.id });
   } catch (e) {
     console.error('agent withdraw error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 
 });
@@ -7214,7 +7213,7 @@ Output ONLY the JSON object.`;
     if (res.headersSent) return;
     clearTimeout(timer);
     console.error('agent chat error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7275,7 +7274,7 @@ Rules:
     res.json({ reply: formatForApp(reply), sources: (research.sources || []).slice(0, 3) });
   } catch (e) {
     console.error('copilot chat error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7342,7 +7341,7 @@ app.post('/api/notifications/register-token', authenticateUser, strictLimiter, a
     if (error) throw error;
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7367,7 +7366,7 @@ app.get('/api/notifications', authenticateUser, async (req, res) => {
     // makes the cast throw and the bell silently shows nothing.
     res.json({ notifications: data || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7386,7 +7385,7 @@ app.post('/api/notifications/mark-read', authenticateUser, async (req, res) => {
     if (error) throw error;
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 //  User-to-User Messages 
@@ -7416,7 +7415,7 @@ app.get('/api/messages', authenticateUser, async (req, res) => {
 
     res.json(Array.from(conversations.values()));
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7438,7 +7437,7 @@ app.get('/api/messages/:targetUserId', authenticateUser, async (req, res) => {
     if (error) throw error;
     res.json(messages || []);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7460,7 +7459,7 @@ app.post('/api/messages/:targetUserId', authenticateUser, strictLimiter, async (
     if (error) throw error;
     res.json(data);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7553,7 +7552,7 @@ app.post('/api/markets/create', authenticateUser, requireVerifiedUser, strictLim
     res.json({ slug, contractAddress });
   } catch (e) {
     console.error('[Custom Market Error] Failed to create custom market:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7610,7 +7609,7 @@ app.post('/api/trade/limit-order', authenticateUser, requireVerifiedUser, tradeL
 
     res.json(data);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7632,7 +7631,7 @@ app.get('/api/trade/limit-orders', authenticateUser, requireVerifiedUser, async 
     // a Map), so a bare array would throw and the limit-orders list stays empty.
     res.json({ orders: data || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7663,7 +7662,7 @@ app.post('/api/trade/limit-order/cancel', authenticateUser, requireVerifiedUser,
 
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -7939,7 +7938,7 @@ app.get('/api/support/tickets', authenticateUser, async (req, res) => {
     if (error) throw error;
     res.json({ tickets: data || [] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err);
   }
 });
 
@@ -7961,7 +7960,7 @@ app.post('/api/support/tickets', authenticateUser, async (req, res) => {
     
     res.status(201).json({ ticket });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err);
   }
 });
 
@@ -7976,7 +7975,7 @@ app.get('/api/support/tickets/:ticketId', authenticateUser, async (req, res) => 
     if (error) throw error;
     res.json({ ticket: data });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err);
   }
 });
 
@@ -8004,7 +8003,7 @@ app.post('/api/support/tickets/:ticketId/messages', authenticateUser, async (req
     
     res.status(201).json({ message });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err);
   }
 });
 
@@ -8026,7 +8025,7 @@ app.get('/api/search', async (req, res) => {
 
     res.json(results);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -8089,6 +8088,14 @@ app.use((err, req, res, _next) => {
   }
 });
 
+// SECURITY (H7 fix): JSON 404 handler — must be after all routes + the error
+// handler's position, but Express only calls 404 handlers that are mounted
+// after routes. Mount it just before app.listen so unmatched routes return
+// JSON instead of Express's default HTML "Cannot GET /xxx".
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found', path: req.path, method: req.method });
+});
+
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
   console.log(`[cache] ${JSON.stringify(cache.stats())}`);
@@ -8136,7 +8143,7 @@ const server = app.listen(PORT, async () => {
 // broadcasts every canonical event to connected Flutter / web clients.
 // `broadcastTrade` below emits TRADE_COMPLETE on the bus; the gateway picks
 // it up  no manual `client.send(...)` loop needed.
-const io = initSocketIo(server);
+const io = initSocketIo(server, { supabaseAuth: supabaseAnon });
 
 //  Raw `ws` gateway (backward-compat for existing feed clients) 
 // Existing Flutter clients (feed_screen.dart, live_on_arc.dart) speak plain
@@ -8292,7 +8299,7 @@ app.get('/api/agent/director/preview', authenticateUser, requireVerifiedUser, as
       moneyBack: DIRECTOR_GUARANTEE_ENABLED,
       teaser,
     });
-  } catch (e) { console.error('[director] preview error:', e.message); res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[director] preview error:', e.message); safeErrorResponse(res, e); }
 });
 
 // Paid (x402): the full structured portfolio. Auth FIRST (whose portfolio),
@@ -8374,7 +8381,7 @@ app.post('/api/agent/director',
     try {
       const plan = await buildDirectorPlan(`supabase_${req.user.id}`, req.body?.riskProfile);
       res.json({ ...plan, payment: req.x402 || null });
-    } catch (e) { console.error('[director] error:', e.message); res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error('[director] error:', e.message); safeErrorResponse(res, e); }
   }
 );
 
@@ -8430,7 +8437,7 @@ app.post('/api/agent/director/order', authenticateUser, requireVerifiedUser, str
       }).then(({ error }) => { if (error) console.warn('[director] receipt:', error.message); });
     }
     res.json({ ...plan, paid, txId, guarantee: guaranteed ? { moneyBack: true, feeUsdc: DIRECTOR_PRICE_USDC } : null });
-  } catch (e) { console.error('[director] order error:', e.message); res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[director] order error:', e.message); safeErrorResponse(res, e); }
 });
 
 // Money-back reconciler: when a paid basket's markets have ALL resolved, settle
@@ -8521,7 +8528,7 @@ app.get('/api/agent/director/record', async (_req, res) => {
       else if (m.status === 'open' || m.status === 'settling') open++;
     }
     res.json({ issued, settled: won + refunded, won, refunded, refundedUsdc: Math.round(refundedUsdc * 100) / 100, open, moneyBack: DIRECTOR_GUARANTEE_ENABLED });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { safeErrorResponse(res, e); }
 });
 
 //  Agent Strategies Engine (Arbitrage & DCA) 
@@ -8558,7 +8565,7 @@ app.get('/api/agent/strategy', authenticateUser, requireVerifiedUser, async (req
     const strategy = await getAgentStrategy(userId);
     res.json({ strategy });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -8569,7 +8576,7 @@ app.post('/api/agent/strategy', authenticateUser, requireVerifiedUser, async (re
     await setAgentStrategy(userId, strategy);
     res.json({ strategy });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
@@ -9564,7 +9571,7 @@ app.get('/api/agents/house', async (req, res) => {
     res.json(data);
   } catch (e) {
     console.error('agents/house error:', e.message);
-    res.status(500).json({ error: e.message });
+    safeErrorResponse(res, e);
   }
 });
 
