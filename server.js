@@ -8822,6 +8822,14 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
     if (awKey) {
       agentWalletAddress = circleAgent.addressFor(awKey);
       if (!agentWalletAddress) throw new Error(`CIRCLE_AGENT_WALLET_ADDRESS_${awKey.toUpperCase()} is not set`);
+      // Back off while Circle still has unexecuted transactions for this
+      // wallet — new submissions queue behind them (observed during the
+      // 2026-08-22 Arc testnet incident where executions stuck in INITIATED).
+      const pending = await circleAgent.pendingCount(agentWalletAddress).catch(() => -1);
+      if (pending > 0) {
+        console.warn(`[agent-wallet:${awKey}] ${pending} pending Circle transaction(s) — skipping trade this cycle`);
+        return false;
+      }
       const allowance = await readAllowance(agentWalletAddress, contractAddress).catch(() => 0n);
       if (BigInt(allowance) < BigInt(amountMicro)) {
         console.log(`[agent-wallet:${awKey}] approving market ${contractAddress}`);
