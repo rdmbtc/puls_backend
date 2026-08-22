@@ -152,12 +152,18 @@ const rateLimitStoreOpts = (tag) => {
   const store = createValkeyRateLimitStore(60 * 1000, tag);
   return store ? { store } : {};
 };
+// Behind Cloudflare the socket IP is Heroku's view of the CF edge node, so a
+// plain req.ip would lump many users into one shared bucket per CF POP. Prefer
+// the real client IP from CF-Connecting-IP (set by Cloudflare, forwarded by
+// Heroku's router); fall back to req.ip for direct/local traffic.
+const clientKey = (req) => String(req.headers['cf-connecting-ip'] || req.ip || '');
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_GENERAL || '300', 10),
   message: { error: 'Too many requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: clientKey,
   ...rateLimitStoreOpts('general'),
 });
 const strictLimiter = rateLimit({
@@ -166,6 +172,7 @@ const strictLimiter = rateLimit({
   message: { error: 'Too many requests for this action. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: clientKey,
   ...rateLimitStoreOpts('strict'),
 });
 // Trading endpoints get a much more generous limit so rapid/fast-buy flows
@@ -177,6 +184,7 @@ const tradeLimiter = rateLimit({
   message: { error: 'Too many trade requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: clientKey,
   ...rateLimitStoreOpts('trade'),
 });
 const activateMarketLimiter = rateLimit({
@@ -185,6 +193,7 @@ const activateMarketLimiter = rateLimit({
   message: { error: 'Too many market activations. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: clientKey,
   ...rateLimitStoreOpts('activate'),
 });
 
@@ -323,8 +332,6 @@ safeInterval('cacheSweep', () => {
     if (typeof insightCache !== 'undefined' && insightCache.size > 50) insightCache.clear();
     if (typeof _explorerCache !== 'undefined' && _explorerCache.size > 50) _explorerCache.clear();
     if (typeof leaderboardCache !== 'undefined' && leaderboardCache.size > 20) leaderboardCache.clear();
-    if (typeof userTrades !== 'undefined' && userTrades.size > 100) userTrades.clear();
-    if (typeof marketTrades !== 'undefined' && marketTrades.size > 100) marketTrades.clear();
     if (typeof llmHeavyCooldown !== 'undefined' && llmHeavyCooldown.size > 0) llmHeavyCooldown.clear();
     if (typeof walletAddressCache !== 'undefined' && walletAddressCache.size > 500) walletAddressCache.clear();
     if (typeof agentStrategies !== 'undefined' && agentStrategies.size > 500) agentStrategies.clear();
@@ -649,10 +656,17 @@ const circle = initiateDeveloperControlledWalletsClient({
   entitySecret: process.env.CIRCLE_ENTITY_SECRET ? process.env.CIRCLE_ENTITY_SECRET.trim() : undefined,
 });
 
-const realSupabase = createClient(
-  process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
-  process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : ''
-);
+// Supabase is OPTIONAL now — data lives in Aiven Postgres (DATABASE_URL) and
+// auth runs through Puls Direct tokens. createClient('') throws, so only
+// construct clients when credentials are actually present; everything else is
+// null-safe (supabaseAnon?.auth checks, adapter's realSupabaseClient guard).
+const SUPABASE_URL_CFG = process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '';
+const SUPABASE_SERVICE_CFG = process.env.SUPABASE_SERVICE_KEY ? process.env.SUPABASE_SERVICE_KEY.trim() : '';
+const SUPABASE_ANON_CFG = process.env.SUPABASE_ANON_KEY ? process.env.SUPABASE_ANON_KEY.trim() : '';
+
+const realSupabase = SUPABASE_URL_CFG && SUPABASE_SERVICE_CFG
+  ? createClient(SUPABASE_URL_CFG, SUPABASE_SERVICE_CFG)
+  : null;
 
 const NEON_DATABASE_URL = (process.env.DATABASE_URL || process.env.NEON_DATABASE_URL || '').trim();
 
@@ -692,10 +706,9 @@ app.get('/51e360e20e504c2ea2d600490b41c099.txt', (req, res) => {
   res.send('51e360e20e504c2ea2d600490b41c099');
 });
 
-const supabaseAnon = createClient(
-  process.env.SUPABASE_URL ? process.env.SUPABASE_URL.trim() : '',
-  process.env.SUPABASE_ANON_KEY ? process.env.SUPABASE_ANON_KEY.trim() : '' 
-);
+const supabaseAnon = SUPABASE_URL_CFG && SUPABASE_ANON_CFG
+  ? createClient(SUPABASE_URL_CFG, SUPABASE_ANON_CFG)
+  : null;
 
 const USDC = '0x3600000000000000000000000000000000000000';
 
@@ -2035,7 +2048,8 @@ const rpcProxyLimiter = rateLimit({
   max: 120,
   message: { error: 'Too many RPC requests from this IP. Please try again later.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  keyGenerator: clientKey
 });
 
 // POST /api/rpc-proxy
@@ -3897,7 +3911,7 @@ app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
 
     // Nanopayment volume  from RPC if available, else single query
     const payCount = Number(stats.nanopayments || payCountRes.count || 0);
-    const nanoVolumeUsdc = Number(stats.nano_volume || 0);
+    let nanoVolumeUsdc = Number(stats.nano_volume || 0);
     let protocolRevenueUsdc = 0;
     // Only fetch nano details if RPC didn't have them
     if (!rpcOk && payCount > 0) {
@@ -3906,7 +3920,7 @@ app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
         .select('amount_usdc')
         .limit(10000);
       for (const r of (nanoAgg || [])) {
-        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0; // won't run  nanoVolumeUsdc is const above
+        nanoVolumeUsdc += parseFloat(r.amount_usdc) || 0;
       }
     }
     const r2 = (n) => Math.round(n * 100) / 100;
@@ -7020,10 +7034,16 @@ async function resolveMarketByName(name, feed) {
 
     let agent = await getAgent(userId);
     if (!agent) {
+      // Look up an existing agent wallet for this user (created via
+      // /api/agent/start). Creation is deliberately NOT done here — that flow
+      // involves funding + budget setup and lives in /api/agent/start.
       try {
-        const wallet = await getOrCreateAgentWallet(userId);
-        if (wallet) {
-          agent = { walletId: wallet.walletId, address: wallet.address, balance: wallet.usdcBalance || '0', exactBalance: wallet.usdcBalance || '0' };
+        const wid = await getWalletId(userId);
+        if (wid) {
+          const info = await getWalletInfo(wid);
+          if (info?.address) {
+            agent = { walletId: wid, address: info.address, balance: info.usdcBalance || '0', exactBalance: info.exactUsdcBalance || '0' };
+          }
         }
       } catch (_) {}
     }

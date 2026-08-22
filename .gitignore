@@ -52,3 +52,8 @@ test_all_8_*.js
 test_endpoints.js
 test_rpc.js
 fix_*_neon.js
+
+# Local probe/debug scripts (may contain hardcoded keys) - never commit
+probe_*.cjs
+probe_*.js
+mk_token.cjs
