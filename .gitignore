@@ -57,3 +57,4 @@ fix_*_neon.js
 probe_*.cjs
 probe_*.js
 mk_token.cjs
+certs/
