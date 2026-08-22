@@ -52,6 +52,8 @@ import { fetchGamma, fetchMarketForResolution, fetchMarketsForResolution, drainC
 import { splitTakeRate, annotatePayment, usdcTransferWithTakeRate, TAKE_RATE } from './lib/payments.js';
 import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, searchSignals, searchDecisions, retrieveContext, searchSignalMarket, osClient, pingOpenSearch, getOpenSearchStats, scheduleMarketRefresh } from './lib/opensearch.js';
 import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware, createValkeyRateLimitStore, redisPing, getRedisStats, shutdownRedis } from './lib/redis.js';
+import { signPulsDirectToken, verifyPulsDirectToken, verifySupabaseJwt } from './lib/auth_verify.js';
+import { backgroundEnabled } from './lib/background.js';
 
 // Auto-index events via eventBus
 if (osClient) {
@@ -105,12 +107,34 @@ function onShutdown(fn) { shutdownHandlers.push(fn); }
 
 async function gracefulShutdown(signal) {
   console.log(`[shutdown] ${signal} received — draining connections...`);
+  // Heroku SIGKILLs ~30s after SIGTERM. SSE/WebSocket connections never end
+  // on their own, so server.close() alone would hang until the SIGKILL.
+  // Force-exit first so in-flight work gets a bounded window to finish.
+  const forceExit = setTimeout(() => {
+    console.error('[shutdown] timed out waiting for connections — force exit');
+    process.exit(1);
+  }, 10_000);
+  if (forceExit.unref) forceExit.unref();
   // Clear all tracked intervals
   for (const id of intervalIds) clearInterval(id);
+  // Stop accepting new WS/SSE clients and terminate existing streams —
+  // they would otherwise hold server.close() open forever.
+  try { io?.close?.(); } catch (_) {}
+  try { rawWs?.clients?.forEach?.((c) => c.terminate()); rawWs?.close?.(); } catch (_) {}
+  try { for (const c of sseClients) c.res.end(); } catch (_) {} // each close listener clears its own ping timer
+  try { server.closeIdleConnections?.(); } catch (_) {}
   // Run registered cleanup handlers (close DB pools, flush caches, etc.)
   await Promise.allSettled(shutdownHandlers.map(fn => fn()));
-  // Close HTTP server — stops accepting new requests, drains keep-alives
-  await new Promise(resolve => server.close(resolve));
+  // Close HTTP server — stops accepting new requests, drains keep-alives.
+  // Bounded so a stubborn connection can't stall the whole shutdown.
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    const t = setTimeout(finish, 5_000);
+    if (t.unref) t.unref();
+    try { server.close(() => { clearTimeout(t); finish(); }); } catch { finish(); }
+  });
+  try { server.closeAllConnections?.(); } catch (_) {}
   console.log('[shutdown] complete');
   process.exit(0);
 }
@@ -243,13 +267,15 @@ app.use(cors({
       allowedOrigins.includes(origin) ||
       /\.pulsmarket\.tech$/.test(origin) ||
       /pulsmarket\.tech$/.test(origin) ||
-      /localhost|127\.0\.0\.1/.test(origin) ||
-      /vercel\.app$/.test(origin)
+      /localhost|127\.0\.0\.1/.test(origin)
     ) {
       return callback(null, true);
     }
     // SECURITY (C2 fix): Actually REJECT disallowed origins instead of
     // falling through to callback(null, true) which allowed everything.
+    // NOTE: the old blanket `*.vercel.app` allowance let ANY random Vercel
+    // subdomain make credentialed requests. Deploy previews / other hosts
+    // must be listed explicitly in ALLOWED_ORIGINS instead.
     return callback(new Error('CORS not allowed'), false);
   },
   credentials: true,
@@ -342,7 +368,11 @@ app.use(sentryRequestHandler); // Sentry performance + error instrumentation
 //  Request timeout middleware 
 // Prevents hung endpoints from consuming a connection forever. Trade endpoints
 // get 60s (on-chain settlement can be slow); everything else gets 30s.
+// Streaming responses (SSE) are excluded — they intentionally never "finish",
+// and their dangling timers would otherwise pile up for every client.
+const STREAMING_PATHS = new Set(['/api/trade/stream', '/stream', '/api/stream']);
 app.use((req, res, next) => {
+  if (STREAMING_PATHS.has(req.path) || req.headers.accept === 'text/event-stream') return next();
   // Agent chat needs longer timeout for LLM reasoning + trade execution
   // RPC proxy also gets more time for upstream node latency
   const timeout = req.path.startsWith('/api/trade') || req.path.startsWith('/api/agent/chat') || req.path.startsWith('/api/rpc-proxy') ? 60000 : 30000;
@@ -418,8 +448,9 @@ const authenticateUser = async (req, res, next) => {
     // stdout  Heroku logs are retained and visible to anyone with dashboard
     // access. This block previously dumped the full header + payload on every
     // authenticated request. Use DEBUG_AUTH=true locally if you need to inspect
-    // a token during development.
-    if (process.env.DEBUG_AUTH === 'true' && token) {
+    // a token during development — it is hard-disabled in production so a
+    // leftover config var can never leak user PII into Logplex again.
+    if (process.env.DEBUG_AUTH === 'true' && token && process.env.NODE_ENV !== 'production' && !process.env.DYNO) {
       try {
         const parts = token.split('.');
         if (parts.length >= 2) {
@@ -439,26 +470,22 @@ const authenticateUser = async (req, res, next) => {
       }
     } catch (_) {}
 
-    // Support Puls Direct Google OAuth tokens and standard user tokens
+    // SECURITY (JWT-bypass fix): the previous fallback decoded the token
+    // payload WITHOUT verifying the signature — anyone could mint
+    // {"sub":"supabase_<victim>","email":"x@y.z"} and impersonate any user.
+    // Only cryptographically-verified tokens are accepted now:
+    //   • Supabase JWTs — ES256 signature checked against the project JWKS
+    //   • Puls Direct tokens — HS256 HMAC signed with a server-side secret
     if (!user && token) {
-      try {
-        const parts = token.split('.');
-        if (parts.length >= 2) {
-          const payloadRaw = Buffer.from(parts[1], 'base64url').toString('utf8') || Buffer.from(parts[1], 'base64').toString('utf8');
-          const payload = JSON.parse(payloadRaw);
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (payload.exp && payload.exp < nowSec) {
-            return res.status(401).json({ error: 'Unauthorized: Token expired' });
-          }
-          if (payload.sub && (payload.email || payload.sub.startsWith('supabase_') || payload.sub.startsWith('google_'))) {
-            user = {
-              id: payload.sub,
-              email: payload.email,
-              user_metadata: payload.user_metadata || {},
-            };
-          }
-        }
-      } catch (_) {}
+      const payload = verifyPulsDirectToken(token) ||
+        await verifySupabaseJwt(token, process.env.SUPABASE_URL);
+      if (!user && payload?.sub) {
+        user = {
+          id: payload.sub,
+          email: payload.email,
+          user_metadata: payload.user_metadata || {},
+        };
+      }
     }
 
     if (!user) {
@@ -511,24 +538,17 @@ const optionalAuth = async (req, res, next) => {
     } catch (_) {}
 
     if (!user && token) {
-      try {
-        const parts = token.split('.');
-        if (parts.length >= 2) {
-          const payloadRaw = Buffer.from(parts[1], 'base64url').toString('utf8') || Buffer.from(parts[1], 'base64').toString('utf8');
-          const payload = JSON.parse(payloadRaw);
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (payload.exp && payload.exp < nowSec) {
-            return next();
-          }
-          if (payload.sub && (payload.email || payload.sub.startsWith('supabase_') || payload.sub.startsWith('google_'))) {
-            user = {
-              id: payload.sub,
-              email: payload.email,
-              user_metadata: payload.user_metadata || {},
-            };
-          }
-        }
-      } catch (_) {}
+      // SECURITY (JWT-bypass fix): signature-verified tokens only — see
+      // authenticateUser above. Invalid/expired tokens simply stay a guest.
+      const payload = verifyPulsDirectToken(token) ||
+        await verifySupabaseJwt(token, process.env.SUPABASE_URL);
+      if (payload?.sub) {
+        user = {
+          id: payload.sub,
+          email: payload.email,
+          user_metadata: payload.user_metadata || {},
+        };
+      }
     }
 
     if (user) {
@@ -758,14 +778,15 @@ app.get('/api/auth/google/callback', async (req, res) => {
       });
     }
 
-      const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-      const jwtPayload = Buffer.from(JSON.stringify({
+      // SECURITY: tokens are now real HS256 JWTs signed with a server-side
+      // secret (PULS_SESSION_SECRET). The old literal "signed_puls_direct"
+      // signature could be forged by anyone, which — combined with the blind
+      // decode in the auth middleware — allowed full account takeover.
+      const token = signPulsDirectToken({
         sub: userId,
         email: googleUser.email,
         user_metadata: { full_name: finalDisplayName, avatar_url: finalAvatarUrl },
-        exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600)
-      })).toString('base64url');
-      const token = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
+      });
 
     // One-time handoff via HttpOnly cookie on .pulsmarket.tech, then redirect
     // to a clean URL. Keeps the JWT out of the query string where edge
@@ -817,18 +838,11 @@ app.get('/api/auth/session', async (req, res) => {
   if (bar < 0) return clearAnd(401, 'invalid_session');
   const userId = raw.slice(0, bar);
   const token = raw.slice(bar + 1);
-  const parts = token.split('.');
-  if (parts.length < 3 || parts[2] !== 'signed_puls_direct') {
-    return clearAnd(401, 'invalid_session');
-  }
-  let payload;
-  try { payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8')); } catch (_) {
-    return clearAnd(401, 'invalid_session');
-  }
-  if (!payload.sub || payload.sub !== userId) return clearAnd(401, 'invalid_session');
-  if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
-    return clearAnd(401, 'session_expired');
-  }
+  // SECURITY: verify the HMAC signature — the literal "signed_puls_direct"
+  // check was forgeable by anyone.
+  const payload = verifyPulsDirectToken(token);
+  if (!payload) return clearAnd(401, 'invalid_session');
+  if (payload.sub !== userId) return clearAnd(401, 'invalid_session');
   const { data: profile } = await supabase
     .from('profiles').select('user_id').eq('user_id', userId).maybeSingle();
   if (!profile) return clearAnd(401, 'user_not_found');
@@ -845,25 +859,17 @@ app.post('/api/auth/refresh', async (req, res) => {
     const bearer = req.headers.authorization || '';
     const token = bearer.startsWith('Bearer ') ? bearer.slice(7) : (req.body?.token || '');
     if (!token) return res.status(401).json({ error: 'Missing token' });
-    const parts = token.split('.');
-    if (parts.length < 3) return res.status(401).json({ error: 'Invalid token format' });
-    if (parts[2] !== 'signed_puls_direct') return res.status(401).json({ error: 'Invalid token signature' });
-    let payload;
-    try { payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8')); } catch (_) {
-      return res.status(401).json({ error: 'Invalid token payload' });
-    }
-    if (!payload.sub) return res.status(401).json({ error: 'Invalid token: missing sub' });
+    // SECURITY: HMAC-verified only (the old literal-signature check was forgeable).
+    const payload = verifyPulsDirectToken(token);
+    if (!payload) return res.status(401).json({ error: 'Invalid token signature' });
     // Verify user still exists
     const { data: profile } = await supabase.from('profiles').select('user_id').eq('user_id', payload.sub).maybeSingle();
     if (!profile) return res.status(401).json({ error: 'User not found' });
-    const jwtHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-    const jwtPayload = Buffer.from(JSON.stringify({
+    const newToken = signPulsDirectToken({
       sub: payload.sub,
       email: payload.email || '',
       user_metadata: payload.user_metadata || {},
-      exp: Math.floor(Date.now() / 1000) + (30 * 24 * 3600),
-    })).toString('base64url');
-    const newToken = `${jwtHeader}.${jwtPayload}.signed_puls_direct`;
+    });
     res.json({ token: newToken, userId: payload.sub });
   } catch (e) {
     console.error('[auth/refresh] error:', e.message);
@@ -915,13 +921,13 @@ const maskRpcUrl = (u) => { try { const x = new URL(u); return `${x.hostname}${x
 // nginx rate-limited (429s) and occasionally blips with HTML error pages,
 // which used to break balance reads and the RPC proxy with 502s.
 const rpcTransport = rpcUrl === publicRpcUrl
-  ? http(rpcUrl, { timeout: 10000 })
+  ? http(rpcUrl, { timeout: 10000, retryCount: 2 })
   : fallback(
       [
-        http(rpcUrl, { timeout: 10000 }),
-        http(publicRpcUrl, { timeout: 10000 }),
+        http(rpcUrl, { timeout: 10000, retryCount: 2 }),
+        http(publicRpcUrl, { timeout: 10000, retryCount: 2 }),
       ],
-      { rank: false, retryCount: 1 }
+      { rank: false, retryCount: 2 }
     );
 console.log(`[RPC] primary=${maskRpcUrl(rpcUrl)}${rpcUrl !== publicRpcUrl ? ` fallback=${maskRpcUrl(publicRpcUrl)}` : ' (single node)'}`);
 const publicClient = createPublicClient({
@@ -932,6 +938,33 @@ const publicClient = createPublicClient({
   // tripping the node's rate limit ("Request exceeds defined limit").
   batch: { multicall: true }
 });
+
+// ── USDC.allowance read cache ────────────────────────────────────────────────
+// The swarm + trade paths poll allowance() constantly and the Arc node's
+// nginx rate-limits bursts (429 "Too Many Requests" broke reads outright).
+// Allowance only changes when an approve() lands, so a short TTL is safe.
+// Invalidate explicitly after any approve write via invalidateAllowance().
+const _allowanceCache = new Map(); // `${owner}:${spender}` -> { value, expiresAt }
+const ALLOWANCE_TTL_MS = parseInt(process.env.ALLOWANCE_CACHE_TTL_MS || '20000', 10);
+const _ALLOWANCE_ABI = [{
+  name: 'allowance', type: 'function', stateMutability: 'view',
+  inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
+  outputs: [{ name: '', type: 'uint256' }],
+}];
+async function readAllowance(owner, spender) {
+  const key = `${String(owner).toLowerCase()}:${String(spender).toLowerCase()}`;
+  const hit = _allowanceCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.value;
+  const value = await publicClient.readContract({
+    address: USDC, abi: _ALLOWANCE_ABI, functionName: 'allowance', args: [owner, spender],
+  });
+  _allowanceCache.set(key, { value, expiresAt: Date.now() + ALLOWANCE_TTL_MS });
+  return value;
+}
+function invalidateAllowance(owner, spender) {
+  if (!owner) { _allowanceCache.clear(); return; }
+  _allowanceCache.delete(`${String(owner).toLowerCase()}:${String(spender ? String(spender).toLowerCase() : '')}`);
+}
 
 const MARKET_INFO_ABI = [
   {
@@ -1195,14 +1228,7 @@ async function getUmaResolution(marketAddress) {
 }
 
 async function ensureOoAllowance(minAmount) {
-  const allowance = await publicClient.readContract({
-    address: USDC,
-    abi: [{ name: 'allowance', type: 'function', stateMutability: 'view',
-      inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
-      outputs: [{ name: '', type: 'uint256' }] }],
-    functionName: 'allowance',
-    args: [adminAccount.address, UMA_OOV2_ADDRESS]
-  });
+  const allowance = await readAllowance(adminAccount.address, UMA_OOV2_ADDRESS);
   if (BigInt(allowance) >= minAmount) return;
   const MAX = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
   const hash = await walletClient.writeContract({
@@ -1213,6 +1239,7 @@ async function ensureOoAllowance(minAmount) {
     functionName: 'approve',
     args: [UMA_OOV2_ADDRESS, MAX]
   });
+  invalidateAllowance(adminAccount.address, UMA_OOV2_ADDRESS);
   await publicClient.waitForTransactionReceipt({ hash });
   console.log('[UMA] Approved OOV2 to pull proposal bonds');
 }
@@ -1438,21 +1465,7 @@ async function _executeMarketDeployment(slug, deadlineSeconds) {
   const initialCost = BigInt(Math.round(b * Math.log(2))); // seed pulled from treasury per market
 
   // Check current allowance first to avoid redundant approvals and race conditions
-  const allowance = await publicClient.readContract({
-    address: USDC,
-    abi: [{
-      name: 'allowance',
-      type: 'function',
-      stateMutability: 'view',
-      inputs: [
-        { name: 'owner', type: 'address' },
-        { name: 'spender', type: 'address' }
-      ],
-      outputs: [{ name: '', type: 'uint256' }]
-    }],
-    functionName: 'allowance',
-    args: [adminAccount.address, FACTORY_ADDRESS]
-  });
+  const allowance = await readAllowance(adminAccount.address, FACTORY_ADDRESS);
 
   if (BigInt(allowance) < initialCost) {
     console.log(`Current factory allowance is ${allowance}, less than required ${initialCost}. Approving MaxUint256...`);
@@ -1472,6 +1485,7 @@ async function _executeMarketDeployment(slug, deadlineSeconds) {
       functionName: 'approve',
       args: [FACTORY_ADDRESS, MAX]
     });
+    invalidateAllowance(adminAccount.address, FACTORY_ADDRESS);
     await publicClient.waitForTransactionReceipt({ hash: approveHash });
     console.log(` Approved factory for MaxUint256 USDC`);
   }
@@ -1633,21 +1647,7 @@ async function isApproved(walletId, contractAddress) {
     const info = await getWalletInfo(walletId);
     if (!info || !info.address) return false;
 
-    const allowance = await publicClient.readContract({
-      address: USDC,
-      abi: [{
-        name: 'allowance',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [
-          { name: 'owner', type: 'address' },
-          { name: 'spender', type: 'address' }
-        ],
-        outputs: [{ name: '', type: 'uint256' }]
-      }],
-      functionName: 'allowance',
-      args: [info.address, contractAddress]
-    });
+    const allowance = await readAllowance(info.address, contractAddress);
 
     return BigInt(allowance) >= BigInt(1_000_000_000_000);
   } catch (e) {
@@ -6269,30 +6269,73 @@ async function resolveAgentTokenId(agentKey, agentAddress) {
 
 // Record ERC-8004 reputation from the ADMIN wallet (an independent validator 
 // ERC-8004 forbids an agent owner from rating its own agent). score 0..100.
-async function recordAgentReputation(agentKey, agentAddress, score, tag) {
+//
+// These are best-effort attestations fired inline after every successful trade.
+// When the Arc node rate-limits us they used to fail loudly ("HTTP request
+// failed.") and the write was lost forever. Writes now go through a serialized
+// queue with bounded retries/backoff — one RPC call in flight at a time, and a
+// transient failure retries instead of dropping the attestation.
+const REP_WRITE_ABI = [{
+  name: 'giveFeedback', type: 'function', stateMutability: 'nonpayable',
+  inputs: [
+    { name: 'agentId', type: 'uint256' }, { name: 'score', type: 'int128' },
+    { name: 'feedbackType', type: 'uint8' }, { name: 'tag', type: 'string' },
+    { name: 'metadataURI', type: 'string' }, { name: 'evidenceURI', type: 'string' },
+    { name: 'comment', type: 'string' }, { name: 'feedbackHash', type: 'bytes32' },
+  ],
+  outputs: [],
+}];
+const repWriteQueue = [];
+let repDraining = false;
+const REP_MAX_QUEUE = 50;      // drop when saturated — best-effort by design
+const REP_MAX_ATTEMPTS = 3;
+
+async function writeAgentReputationOnce(agentKey, agentAddress, score, tag) {
+  if (!walletClient || !adminAccount) return;
+  const tokenId = await resolveAgentTokenId(agentKey, agentAddress);
+  if (!tokenId) return;
+  await walletClient.writeContract({
+    address: REPUTATION_REGISTRY,
+    abi: REP_WRITE_ABI,
+    functionName: 'giveFeedback',
+    args: [BigInt(tokenId), BigInt(score), 0, tag, '', '', '', keccak256(toHex(`${tag}-${Date.now()}`))],
+  });
+  agentRepCount.set(agentKey, (agentRepCount.get(agentKey) || 0) + 1);
+}
+
+async function drainRepWrites() {
+  if (repDraining) return;
+  repDraining = true;
   try {
-    if (!walletClient || !adminAccount) return;
-    const tokenId = await resolveAgentTokenId(agentKey, agentAddress);
-    if (!tokenId) return;
-    await walletClient.writeContract({
-      address: REPUTATION_REGISTRY,
-      abi: [{
-        name: 'giveFeedback', type: 'function', stateMutability: 'nonpayable',
-        inputs: [
-          { name: 'agentId', type: 'uint256' }, { name: 'score', type: 'int128' },
-          { name: 'feedbackType', type: 'uint8' }, { name: 'tag', type: 'string' },
-          { name: 'metadataURI', type: 'string' }, { name: 'evidenceURI', type: 'string' },
-          { name: 'comment', type: 'string' }, { name: 'feedbackHash', type: 'bytes32' },
-        ],
-        outputs: [],
-      }],
-      functionName: 'giveFeedback',
-      args: [BigInt(tokenId), BigInt(score), 0, tag, '', '', '', keccak256(toHex(`${tag}-${Date.now()}`))],
-    });
-    agentRepCount.set(agentKey, (agentRepCount.get(agentKey) || 0) + 1);
-  } catch (e) {
-    console.error('recordAgentReputation error:', e.shortMessage || e.message);
+    while (repWriteQueue.length > 0) {
+      const job = repWriteQueue[0];
+      try {
+        await writeAgentReputationOnce(job.agentKey, job.agentAddress, job.score, job.tag);
+        repWriteQueue.shift();
+      } catch (e) {
+        job.attempts = (job.attempts || 0) + 1;
+        console.warn(`[reputation] write failed (${job.attempts}/${REP_MAX_ATTEMPTS}) for ${job.agentKey}: ${e.shortMessage || e.message}`);
+        if (job.attempts >= REP_MAX_ATTEMPTS) {
+          repWriteQueue.shift();
+          continue;
+        }
+        await new Promise((r) => setTimeout(r, 5_000 * job.attempts)); // 5s → 10s backoff
+      }
+    }
+  } finally {
+    repDraining = false;
   }
+}
+
+// Public API — enqueue and return immediately (callers never await on-chain).
+function recordAgentReputation(agentKey, agentAddress, score, tag) {
+  if (!walletClient || !adminAccount) return Promise.resolve();
+  if (repWriteQueue.length >= REP_MAX_QUEUE) return Promise.resolve();
+  // Dedupe: an identical pending job for this agent+tag doesn't need duplicating.
+  if (repWriteQueue.some((j) => j.agentKey === agentKey && j.tag === tag)) return Promise.resolve();
+  repWriteQueue.push({ agentKey, agentAddress, score, tag });
+  drainRepWrites().catch(() => {});
+  return Promise.resolve();
 }
 
 // Completes a chat from ONE provider, dispatching by wire format.
@@ -8135,7 +8178,19 @@ const server = app.listen(PORT, async () => {
   }
   console.log(`[UMA] Optimistic Oracle resolution: ${UMA_RESOLUTION && UMA_ADAPTER_ADDRESS ? `ENABLED (adapter ${UMA_ADAPTER_ADDRESS}, oracle ${UMA_OOV2_ADDRESS})` : 'disabled (legacy direct resolve)'}`);
   console.log(`[Wallets] account type: ${WALLET_ACCOUNT_TYPE}; Circle webhook signature enforce: ${CIRCLE_WEBHOOK_ENFORCE}`);
+  // Cache seeding stays on EVERY dyno — API routes read these.
   await loadDeployedMarkets();
+  checkTreasuryBalance().catch(console.error);
+  loadWalletAddressMapping()
+    .catch(console.error)
+    .then(() => updateLeaderboard())
+    .catch(console.error);
+  if (!backgroundEnabled()) {
+    // WORKER_SPLIT=true on Heroku: web dynos serve HTTP only; a worker dyno
+    // runs the recurring background loops. See lib/background.js for setup.
+    console.log('[background] recurring loops skipped on web dyno (WORKER_SPLIT=true) — they run on worker');
+    return;
+  }
   setTimeout(() => {
     checkAndResolveMarkets().catch(console.error);
     scheduleNextMarketResolution();
@@ -8151,11 +8206,6 @@ const server = app.listen(PORT, async () => {
       } catch (_) {}
     }, 60_000).unref?.();
   }, 30_000).unref?.();
-  checkTreasuryBalance().catch(console.error);
-  loadWalletAddressMapping()
-    .catch(console.error)
-    .then(() => updateLeaderboard())
-    .catch(console.error);
 });
 
 // Socket.IO gateway

@@ -4,6 +4,9 @@
   "description": "",
   "main": "server.js",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "start": "node --max-old-space-size=384 --expose-gc server.js",
     "dev": "node --watch --max-old-space-size=384 --expose-gc server.js",
@@ -13,7 +16,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "better-sqlite3": "^12.6.2",
     "@circle-fin/adapter-circle-wallets": "^1.3.2",
     "@circle-fin/app-kit": "^1.7.0",
     "@circle-fin/developer-controlled-wallets": "^10.3.1",
