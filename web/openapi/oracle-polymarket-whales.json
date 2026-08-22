@@ -1,0 +1,72 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Polymarket Whale Tracker",
+    "summary": "Large-position movements and smart-money net flow on Polymarket for $0.000002 via Circle Nanopayments (x402) on Arc.",
+    "description": "Prediction-market micro-oracle: snapshot of smart-money net direction and the largest tracked open position on Polymarket-style markets. Payment via x402: an unauthenticated request returns HTTP 402 with a base64 PAYMENT-REQUIRED header; retry with a payment-signature header to receive the resource plus a PAYMENT-RESPONSE settlement header.",
+    "version": "1.0.0",
+    "x-puls-service-id": "polymarket_whale",
+    "x-x402": {
+      "protocolVersion": 2,
+      "scheme": "exact",
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "assetSymbol": "USDC",
+      "priceUsdc": "0.000002",
+      "payTo": "0xa93FFcC230d1bd6f6b0a23a7f8BEcc2C9ECD894e",
+      "gatewayWallet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
+      "maxTimeoutSeconds": 691200
+    }
+  },
+  "servers": [
+    { "url": "https://api.pulsmarket.tech", "description": "Production (Arc Testnet settlement)" }
+  ],
+  "security": [],
+  "paths": {
+    "/api/oracle/polymarket-whales": {
+      "get": {
+        "operationId": "getPolymarketWhales",
+        "summary": "Paid whale-flow oracle ($0.000002 USDC)",
+        "tags": ["Prediction Markets"],
+        "parameters": [],
+        "responses": {
+          "402": {
+            "description": "Payment required. A base64 PAYMENT-REQUIRED header carries the x402 v2 requirements (scheme exact, network eip155:5042002, USDC, amount 2 atomic units).",
+            "headers": {
+              "PAYMENT-REQUIRED": { "required": true, "schema": { "type": "string", "contentEncoding": "base64" } }
+            }
+          },
+          "200": {
+            "description": "Oracle data delivered after successful x402 settlement.",
+            "headers": {
+              "PAYMENT-RESPONSE": { "required": false, "schema": { "type": "string", "contentEncoding": "base64" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "service": { "const": "polymarket_whale" },
+                    "flow": {
+                      "type": "object",
+                      "properties": {
+                        "smartMoneyNet": { "type": "string", "example": "+12%" },
+                        "largestPositionSize": { "type": "string", "example": "1.2M USDC" }
+                      }
+                    },
+                    "meta": { "type": "object", "properties": { "source": { "type": "string" }, "freshness": { "type": "string" }, "confidence": { "type": "number" } } },
+                    "settled": { "type": ["object", "null"], "properties": { "by": { "type": "string" }, "tx": { "type": ["string", "null"] } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "x-how-to-pay": {
+    "circleCli": "circle services pay \"https://api.pulsmarket.tech/api/oracle/polymarket-whales\" --address <AGENT_WALLET_ADDRESS> --chain ARC-TESTNET"
+  }
+}

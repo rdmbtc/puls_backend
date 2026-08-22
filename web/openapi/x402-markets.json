@@ -1,0 +1,87 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Puls Market Snapshot",
+    "summary": "Live prediction-market data feed for $0.01 per call via Circle Nanopayments (x402) on Arc.",
+    "description": "Live snapshot of top prediction markets: slugs, questions, YES/NO prices, volume, liquidity and deadlines in compact LLM-ready JSON. Payment is required on every request using the x402 protocol: a request without payment returns HTTP 402 with a base64 PAYMENT-REQUIRED header; retry with a payment-signature header to receive the resource plus a PAYMENT-RESPONSE settlement header.",
+    "version": "1.0.0",
+    "x-puls-service-id": "puls-market-snapshot",
+    "x-x402": {
+      "protocolVersion": 2,
+      "scheme": "exact",
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "assetSymbol": "USDC",
+      "priceUsdc": "0.01",
+      "payTo": "0xa93FFcC230d1bd6f6b0a23a7f8BEcc2C9ECD894e",
+      "gatewayWallet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
+      "maxTimeoutSeconds": 691200
+    }
+  },
+  "servers": [
+    { "url": "https://api.pulsmarket.tech", "description": "Production (Arc Testnet settlement)" }
+  ],
+  "security": [],
+  "paths": {
+    "/api/x402/markets": {
+      "get": {
+        "operationId": "getX402Markets",
+        "summary": "Paid live market-data snapshot ($0.01 USDC)",
+        "tags": ["Prediction Markets"],
+        "parameters": [
+          { "name": "count", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }, "description": "Number of markets to return." },
+          { "name": "category", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Filter by category (e.g. Crypto, Sports, Politics)." }
+        ],
+        "responses": {
+          "402": {
+            "description": "Payment required. A base64 PAYMENT-REQUIRED header carries the x402 v2 requirements (scheme exact, network eip155:5042002, USDC, amount 10000 atomic units, payTo seller address).",
+            "headers": {
+              "PAYMENT-REQUIRED": { "required": true, "schema": { "type": "string", "contentEncoding": "base64" }, "description": "Base64-encoded JSON payment requirements." }
+            }
+          },
+          "200": {
+            "description": "Market snapshot purchased successfully via x402.",
+            "headers": {
+              "PAYMENT-RESPONSE": { "required": false, "schema": { "type": "string", "contentEncoding": "base64" }, "description": "Base64-encoded JSON settlement receipt (success, transaction, network, payer)." }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "paid": { "type": "string", "example": "$0.01" },
+                    "count": { "type": "integer" },
+                    "markets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slug": { "type": "string" },
+                          "question": { "type": "string" },
+                          "category": { "type": "string" },
+                          "yesPrice": { "type": "number" },
+                          "noPrice": { "type": "number" },
+                          "volume": { "type": ["number", "null"] },
+                          "liquidity": { "type": ["number", "null"] },
+                          "endDate": { "type": ["string", "null"], "format": "date-time" },
+                          "acceptingOrders": { "type": "boolean" }
+                        }
+                      }
+                    },
+                    "settled": { "type": "object", "properties": { "by": { "type": "string" }, "tx": { "type": ["string", "null"] } } }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "description": "Upstream feed failure." }
+        }
+      }
+    }
+  },
+  "x-how-to-pay": {
+    "circleCli": "circle services pay \"https://api.pulsmarket.tech/api/x402/markets\" --address <AGENT_WALLET_ADDRESS> --chain ARC-TESTNET",
+    "note": "Any standard x402 client works: sign an EIP-3009 TransferWithAuthorization against the GatewayWalletBatched domain and send it base64-encoded in the payment-signature header."
+  }
+}

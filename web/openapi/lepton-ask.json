@@ -1,0 +1,71 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Puls Lepton Oracle",
+    "summary": "Ask the Puls AI agent swarm any forecasting question for one lepton ($0.000001) via Circle Nanopayments (x402) on Arc.",
+    "description": "Keyless swarm-forecast oracle: submit a research question and receive a sharp, falsifiable forecast with stance, confidence and reasoning from the Puls autonomous agent swarm. Payment via x402: an unauthenticated request returns HTTP 402 with a base64 PAYMENT-REQUIRED header; retry with a payment-signature header to receive the resource plus PAYMENT-RESPONSE settlement header. This is the floor price of the Puls Bazaar: $0.000001 (one lepton).",
+    "version": "1.0.0",
+    "x-puls-service-id": "puls-lepton",
+    "x-x402": {
+      "protocolVersion": 2,
+      "scheme": "exact",
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "assetSymbol": "USDC",
+      "priceUsdc": "0.000001",
+      "payTo": "0xa93FFcC230d1bd6f6b0a23a7f8BEcc2C9ECD894e",
+      "gatewayWallet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
+      "maxTimeoutSeconds": 691200
+    }
+  },
+  "servers": [
+    { "url": "https://api.pulsmarket.tech", "description": "Production (Arc Testnet settlement)" }
+  ],
+  "security": [],
+  "paths": {
+    "/api/lepton/ask": {
+      "get": {
+        "operationId": "getLeptonAsk",
+        "summary": "Paid swarm forecast ($0.000001 USDC)",
+        "tags": ["AI Forecasting"],
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 8 }, "description": "The forecasting question, e.g. 'Will the Fed cut rates in September 2026?'" }
+        ],
+        "responses": {
+          "402": {
+            "description": "Payment required. A base64 PAYMENT-REQUIRED header carries the x402 v2 requirements (scheme exact, network eip155:5042002, USDC, amount 1 atomic unit).",
+            "headers": {
+              "PAYMENT-REQUIRED": { "required": true, "schema": { "type": "string", "contentEncoding": "base64" } }
+            }
+          },
+          "200": {
+            "description": "Forecast delivered after successful x402 settlement.",
+            "headers": {
+              "PAYMENT-RESPONSE": { "required": false, "schema": { "type": "string", "contentEncoding": "base64" }, "description": "Base64-encoded JSON settlement receipt." }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "question": { "type": "string" },
+                    "answer": { "type": "string", "description": "Sharp falsifiable forecast with stance and confidence." },
+                    "confidence": { "type": ["number", "null"] },
+                    "sources": { "type": "array", "items": { "type": "string" } },
+                    "paid": { "type": "string", "example": "$0.000001" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Missing or too-short q parameter." },
+          "502": { "description": "LLM/research upstream failure." }
+        }
+      }
+    }
+  },
+  "x-how-to-pay": {
+    "circleCli": "circle services pay \"https://api.pulsmarket.tech/api/lepton/ask?q=Will+BTC+close+above+150k+in+2026\" --address <AGENT_WALLET_ADDRESS> --chain ARC-TESTNET"
+  }
+}

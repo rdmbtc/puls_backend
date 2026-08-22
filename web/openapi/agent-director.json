@@ -1,0 +1,108 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Puls Finance Director",
+    "summary": "Structured, risk-managed prediction portfolio sized to your balance for $0.50 via Circle Nanopayments (x402) on Arc.",
+    "description": "The highest-tier Puls agent product: an AI Finance Director analyzes your wallet, win rate and open positions, then returns a structured prediction-market basket with sizing, risk profile and a money-back guarantee when enabled. NOTE: this endpoint combines x402 payment with Supabase authentication (Bearer token) — it is aimed at logged-in Puls users; keyless agents should use the other Bazaar services. Payment via x402: a request without payment returns HTTP 402 with a base64 PAYMENT-REQUIRED header; retry with a payment-signature header to receive the plan plus a PAYMENT-RESPONSE settlement header.",
+    "version": "1.0.0",
+    "x-puls-service-id": "puls-director",
+    "x-x402": {
+      "protocolVersion": 2,
+      "scheme": "exact",
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "assetSymbol": "USDC",
+      "priceUsdc": "0.50",
+      "payTo": "0xa93FFcC230d1bd6f6b0a23a7f8BEcc2C9ECD894e",
+      "gatewayWallet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
+      "maxTimeoutSeconds": 691200,
+      "requiresAuth": true
+    }
+  },
+  "servers": [
+    { "url": "https://api.pulsmarket.tech", "description": "Production (Arc Testnet settlement)" }
+  ],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    }
+  },
+  "paths": {
+    "/api/agent/director": {
+      "post": {
+        "operationId": "postAgentDirector",
+        "summary": "Paid AI Finance Director portfolio plan ($0.50 USDC)",
+        "tags": ["AI Finance"],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "riskProfile": { "type": "string", "enum": ["conservative", "balanced", "aggressive"], "default": "balanced" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": { "description": "Missing or invalid authentication (Supabase session)." },
+          "402": {
+            "description": "Payment required. A base64 PAYMENT-REQUIRED header carries the x402 v2 requirements (scheme exact, network eip155:5042002, USDC, amount 500000 atomic units).",
+            "headers": {
+              "PAYMENT-REQUIRED": { "required": true, "schema": { "type": "string", "contentEncoding": "base64" } }
+            }
+          },
+          "200": {
+            "description": "Portfolio plan delivered after successful x402 settlement.",
+            "headers": {
+              "PAYMENT-RESPONSE": { "required": false, "schema": { "type": "string", "contentEncoding": "base64" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "riskProfile": { "type": "string" },
+                    "basket": { "type": "array", "items": { "type": "object" }, "description": "Recommended markets with side, size and rationale." },
+                    "payment": { "type": ["object", "null"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/director/preview": {
+      "get": {
+        "operationId": "getAgentDirectorPreview",
+        "summary": "Free teaser of the Director plan (no payment)",
+        "tags": ["AI Finance"],
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Free teaser including priceUsdc to unlock the full plan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "teaser": { "type": "string" },
+                    "priceUsdc": { "type": "number", "example": 0.5 }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid authentication." }
+        }
+      }
+    }
+  },
+  "x-how-to-pay": {
+    "note": "Browser/in-app buyers: authenticate, POST without payment to receive the 402 requirements, then sign the Gateway authorization client-side and retry with the payment-signature header."
+  }
+}

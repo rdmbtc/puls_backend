@@ -1,0 +1,73 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Puls x402 Seller Index",
+    "summary": "Index of all Puls paid x402 endpoints on Arc (eip155:5042002) — seller pack for the Circle Agent Marketplace.",
+    "description": "Lists every paywalled Puls endpoint with its OpenAPI spec URL, price, network and payout address. All services settle USDC via Circle Gateway batched nanopayments (x402 v2, scheme exact) on Arc Testnet. Discovery is free; data is paid. Free discovery APIs: GET /api/bazaar (catalog), GET /api/bazaar/search?q=, GET /api/x402/info (payment config).",
+    "version": "1.0.0",
+    "x-x402": {
+      "protocolVersion": 2,
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "assetSymbol": "USDC",
+      "payTo": "0xa93FFcC230d1bd6f6b0a23a7f8BEcc2C9ECD894e",
+      "gatewayWallet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9"
+    }
+  },
+  "servers": [
+    { "url": "https://api.pulsmarket.tech" }
+  ],
+  "paths": {},
+  "x-services": [
+    {
+      "name": "Puls Market Snapshot",
+      "endpoint": "https://api.pulsmarket.tech/api/x402/markets",
+      "method": "GET",
+      "priceUsdc": "0.01",
+      "openapi": "/openapi/x402-markets.json"
+    },
+    {
+      "name": "Puls Lepton Oracle",
+      "endpoint": "https://api.pulsmarket.tech/api/lepton/ask?q=<question>",
+      "method": "GET",
+      "priceUsdc": "0.000001",
+      "openapi": "/openapi/lepton-ask.json"
+    },
+    {
+      "name": "Puls Alpha Signal",
+      "endpoint": "https://api.pulsmarket.tech/api/alpha/sample",
+      "method": "GET",
+      "priceUsdc": "0.001",
+      "openapi": "/openapi/alpha-sample.json"
+    },
+    {
+      "name": "BTCNode Premium Oracle",
+      "endpoint": "https://api.pulsmarket.tech/api/oracle/btcnode-premium",
+      "method": "GET",
+      "priceUsdc": "0.000001",
+      "openapi": "/openapi/oracle-btcnode-premium.json"
+    },
+    {
+      "name": "Sugra Macro Intelligence",
+      "endpoint": "https://api.pulsmarket.tech/api/oracle/sugra-macro",
+      "method": "GET",
+      "priceUsdc": "0.000005",
+      "openapi": "/openapi/oracle-sugra-macro.json"
+    },
+    {
+      "name": "Polymarket Whale Tracker",
+      "endpoint": "https://api.pulsmarket.tech/api/oracle/polymarket-whales",
+      "method": "GET",
+      "priceUsdc": "0.000002",
+      "openapi": "/openapi/oracle-polymarket-whales.json"
+    },
+    {
+      "name": "Puls Finance Director",
+      "endpoint": "https://api.pulsmarket.tech/api/agent/director",
+      "method": "POST",
+      "priceUsdc": "0.50",
+      "requiresAuth": true,
+      "openapi": "/openapi/agent-director.json"
+    }
+  ]
+}

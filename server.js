@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // Observability MUST be initialized before express() so Sentry can
 // instrument the middleware stack. Safe no-op when SENTRY_DSN is unset.
@@ -37,6 +39,7 @@ import { registerAgentDuel } from './lib/agent_duel.js';
 import { registerAgentPnl, syncSettlementClaims } from './lib/agent_pnl.js';
 import { registerLepton } from './lib/lepton.js';
 import { registerX402Markets } from './lib/x402_markets.js';
+import { registerX402Oracles } from './lib/x402_oracles.js';
 import { registerBazaar } from './lib/bazaar.js';
 import { registerInvest } from './lib/invest.js';
 import { registerNewsCreatorRoutes } from './lib/news_creator.js';
@@ -4392,6 +4395,32 @@ function listMarketSummaries() {
   }
   return out;
 }
+//  x402 Oracles  the paid /api/oracle/* data services sold via Nanopayments 
+// MUST be registered before registerAgentOracle: its /api/oracle/:slug route
+// would otherwise shadow these specific paywalled paths.
+registerX402Oracles(app);
+
+//  OpenAPI seller pack  machine-readable specs for every paid endpoint 
+// Loaded once at boot from web/openapi/*.json and served (no auth, cached 1h)
+// so health-checkers, the Circle Agent Marketplace intake and any x402 client
+// can read each service's exact price/network/payout without scraping.
+const openapiSpecs = new Map();
+try {
+  const openapiDir = path.join(process.cwd(), 'web', 'openapi');
+  for (const f of fs.readdirSync(openapiDir)) {
+    if (!f.endsWith('.json')) continue;
+    try { openapiSpecs.set(f.replace(/\.json$/, ''), JSON.parse(fs.readFileSync(path.join(openapiDir, f), 'utf-8'))); }
+    catch (e) { console.warn(`[openapi] invalid spec ${f}: ${e.message}`); }
+  }
+} catch (_) {}
+app.get('/openapi/:name', (req, res) => {
+  const spec = openapiSpecs.get(String(req.params.name || '').replace(/\.json$/, ''));
+  if (!spec) return res.status(404).json({ error: 'Unknown spec', available: [...openapiSpecs.keys()] });
+  res.set('Cache-Control', 'public, max-age=3600');
+  return res.json(spec);
+});
+console.log(`[openapi] serving ${openapiSpecs.size} spec(s) at /openapi/:name (${[...openapiSpecs.keys()].join(', ')})`);
+
 registerAgentOracle(app, {
   supabase,
   researchQuestion,
@@ -8199,6 +8228,23 @@ const server = app.listen(PORT, async () => {
   if (process.env.CIRCLE_AGENT_WALLETS) {
     if (sess.ok) console.log(`[agent-wallet] Circle CLI session ${sess.source === 'CIRCLE_AGENT_SESSION_B64' ? 'materialized from CIRCLE_AGENT_SESSION_B64' : 'ready (' + sess.source + ')'}`);
     else console.warn(`[agent-wallet] CLI session unavailable: ${sess.reason}`);
+    // Session-expiry guard: sessions last ~28 days. Warn loudly when the
+    // materialized session is close to expiring so it gets refreshed BEFORE
+    // every agent-wallet action starts failing.
+    let expiry = circleAgent.parseSessionExpiry(process.env.CIRCLE_AGENT_SESSION_B64);
+    if (!expiry && sess.source === 'disk') {
+      try {
+        const file = path.join(process.env.CIRCLE_CLI_HOME || path.join(os.homedir(), '.circle-cli'), 'profiles', 'agent', 'session.json');
+        expiry = circleAgent.parseSessionExpiry(fs.readFileSync(file, 'utf-8'));
+      } catch (_) {}
+    }
+    if (expiry && Number.isFinite(expiry.daysLeft)) {
+      const d = Math.floor(expiry.daysLeft);
+      if (d < 3) console.warn(`[agent-wallet] ⚠️  SESSION EXPIRES IN ${d}d — refresh CIRCLE_AGENT_SESSION_B64 (circle wallet login --testnet, then update the config var). Expires at ${new Date(expiry.expiresAtMs).toISOString()}`);
+      else console.log(`[agent-wallet] session valid for ${d} more day(s) (expires ${new Date(expiry.expiresAtMs).toISOString()})`);
+    } else {
+      console.warn('[agent-wallet] session expiry unknown — could not parse expiresAt from CIRCLE_AGENT_SESSION_B64');
+    }
   }
   console.log(`[cache] ${JSON.stringify(cache.stats())}`);
   if (osClient) {
