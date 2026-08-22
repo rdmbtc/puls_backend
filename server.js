@@ -54,6 +54,7 @@ import { initIndices, indexMarket, indexSignal, indexDecision, searchMarkets, se
 import { redisClient, cacheGet, cacheSet, cacheDel, cacheMiddleware, createValkeyRateLimitStore, redisPing, getRedisStats, shutdownRedis } from './lib/redis.js';
 import { signPulsDirectToken, verifyPulsDirectToken, verifySupabaseJwt } from './lib/auth_verify.js';
 import { backgroundEnabled } from './lib/background.js';
+import * as circleAgent from './lib/circle_agent_wallet.js';
 
 // Auto-index events via eventBus
 if (osClient) {
@@ -8192,6 +8193,13 @@ app.use((err, req, res, _next) => {
 
 const server = app.listen(PORT, async () => {
   console.log(`Puls backend :${PORT}`);
+  // Circle Agent Stack (pilot): materialize the CLI login session for
+  // ephemeral filesystems and log which agents run on Agent Wallets.
+  const sess = circleAgent.ensureSession();
+  if (process.env.CIRCLE_AGENT_WALLETS) {
+    if (sess.ok) console.log(`[agent-wallet] Circle CLI session ${sess.source === 'CIRCLE_AGENT_SESSION_B64' ? 'materialized from CIRCLE_AGENT_SESSION_B64' : 'ready (' + sess.source + ')'}`);
+    else console.warn(`[agent-wallet] CLI session unavailable: ${sess.reason}`);
+  }
   console.log(`[cache] ${JSON.stringify(cache.stats())}`);
   if (osClient) {
     initIndices().catch(e => console.warn('[opensearch] init failed:', e.message));
@@ -8803,8 +8811,34 @@ async function executeDCAStrategy(userId, agentWalletId, balance) {
 async function executeAgentTrade(userId, agentWalletId, contractAddress, side, amount, slug) {
   try {
     const amountMicro = Math.round(amount * 1_000_000).toString();
+    const MAX = '115792089237316195423570985008687907853269984665640564039457584007913129639935';
+
+    // ── Circle Agent Stack pilot (lib/circle_agent_wallet.js) ──────────────
+    // Agents listed in CIRCLE_AGENT_WALLETS trade from their Circle Agent
+    // Wallet (user-controlled MPC) via the Circle CLI instead of a
+    // developer-controlled SCA. agentWalletId is null on this path.
+    let circleId = null, txHash = null, finalState = null, agentWalletAddress = null;
+    const awKey = circleAgent.isEnabledForUser(userId);
+    if (awKey) {
+      agentWalletAddress = circleAgent.addressFor(awKey);
+      if (!agentWalletAddress) throw new Error(`CIRCLE_AGENT_WALLET_ADDRESS_${awKey.toUpperCase()} is not set`);
+      const allowance = await readAllowance(agentWalletAddress, contractAddress).catch(() => 0n);
+      if (BigInt(allowance) < BigInt(amountMicro)) {
+        console.log(`[agent-wallet:${awKey}] approving market ${contractAddress}`);
+        await circleAgent.executeContract({
+          signature: 'approve(address,uint256)', params: [contractAddress, MAX],
+          contract: USDC, address: agentWalletAddress,
+        });
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      const buy = await circleAgent.executeContract({
+        signature: side === 'YES' ? 'buyYes(uint256)' : 'buyNo(uint256)',
+        params: [amountMicro], contract: contractAddress, address: agentWalletAddress,
+      });
+      circleId = buy.id; txHash = buy.txHash || null; finalState = buy.state;
+      console.log(`[agent-wallet:${awKey}] ${side} ${amount} USDC via Circle Agent Stack (tx ${txHash || circleId})`);
+    } else {
     if (!(await isApproved(agentWalletId, contractAddress))) {
-      const MAX = '115792089237316195423570985008687907853269984665640564039457584007913129639935';
       await circle.createContractExecutionTransaction({
         walletId: agentWalletId, contractAddress: USDC,
         abiFunctionSignature: 'approve(address,uint256)', abiParameters: [contractAddress, MAX],
@@ -8820,8 +8854,7 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
       fee: { type: 'level', config: { feeLevel: 'HIGH' } },
     });
     
-    const circleId = txRes.data.id;
-    let txHash = null, finalState = null;
+    circleId = txRes.data.id;
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1500));
       try {
@@ -8832,7 +8865,8 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
         if (['COMPLETE', 'FAILED', 'DENIED', 'CANCELLED'].includes(finalState)) break;
       } catch (_) {}
     }
-    
+    }
+
     if (finalState === 'COMPLETE') {
       let question = slug.split('-').join(' ');
       if (question.length > 0) {
@@ -8891,8 +8925,8 @@ async function executeAgentTrade(userId, agentWalletId, contractAddress, side, a
         broadcastTrade(newTrade);
       }
       
-      const info = await getWalletInfo(agentWalletId);
-      recordAgentReputation(`agent_${userId}`, info.address, 90, 'successful_trade').catch(() => {});
+      const repAddr = agentWalletAddress || (await getWalletInfo(agentWalletId)).address;
+      recordAgentReputation(`agent_${userId}`, repAddr, 90, 'successful_trade').catch(() => {});
       return { ok: true, txHash, tradeId: newTrade?.id ?? null };
     }
     return false;
