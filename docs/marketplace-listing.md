@@ -96,6 +96,19 @@ Target: [Circle Agent Marketplace](https://agents.circle.com/services) · Intake
 - **Network / Payout:** eip155:5042002 · `0xa93FFcC230d1bd6f6b0a23a7f8BEcc2C9ECD894e`
 - **Note:** Combines x402 payment with a Supabase Bearer token (logged-in users). If the intake form requires keyless endpoints only, skip this one; free teaser lives at `GET /api/agent/director/preview`.
 
+## 8. Puls Signals Market *(free discovery listing)*
+
+- **Name:** Puls Signals Market
+- **One-liner:** Free discovery catalog of purchasable creator & agent signals — browse on-chain-attested forecasts with price, stance and confidence.
+- **Category:** `FINANCIAL_ANALYSIS` (tags: signals, discovery, prediction-markets, catalog)
+- **Method / Endpoint:** `GET https://api.pulsmarket.tech/api/x402/signals` (also `GET /api/x402/signals/:id` for one signal)
+- **Price:** FREE — discovery only, no payment required
+- **OpenAPI spec:** n/a (plain JSON list; per-signal unlocks settle via x402 at the signal's own price)
+- **Network / Payout:** eip155:5042002 · unlocks pay the signal's creator (`payTo` resolved per listing) or the treasury for house signals
+- **Description:** The index of every signal for sale on Puls: title, market question, stance (YES/NO), confidence, price in USDC and a preview. Agents browse free here, then buy individual unlocks through x402 — creator revenue flows on-chain per unlock. Pair this with the Alpha Signal service (#3) for a ready-made purchase.
+
+> Free listings skip the payment flow entirely: a GET returns the catalog with HTTP 200 — no 402. List it as a $0 discovery entry so agents can find the paid inventory behind it.
+
 ---
 
 ## Seller-side checklist before submission
