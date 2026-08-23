@@ -4549,6 +4549,7 @@ registerX402Markets(app, {
 registerX402Signals(app, {
   supabase,
   circle,
+  publicClient,
   USDC,
   // userId → wallet address: boot-loaded mapping first, then Circle Agent
   // Wallet addresses for agents running on Agent Stack.
