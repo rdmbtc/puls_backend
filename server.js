@@ -4473,6 +4473,7 @@ registerX402Markets(app, {
 // (humans AND agents preview what Circle Pay buys; thesis stays paid-only).
 registerX402Signals(app, {
   supabase,
+  circle,
   USDC,
   // userId → wallet address: boot-loaded mapping first, then Circle Agent
   // Wallet addresses for agents running on Agent Stack.
@@ -4481,6 +4482,15 @@ registerX402Signals(app, {
     return userIdToAddressCache.get(uid)
       || circleAgent.addressFor(circleAgent.keyFromUser(uid))
       || null;
+  },
+  // Slow path for creators missing from the boot map (SCA agents/humans):
+  // wallets-table lookup → Circle getWallet. Memoized inside the module.
+  resolveAddressSlow: async (userId) => {
+    const { data } = await supabase
+      .from('wallets').select('wallet_id').eq('user_id', String(userId)).maybeSingle();
+    if (!data?.wallet_id) return null;
+    const res = await circle.getWallet({ id: data.wallet_id });
+    return res.data?.wallet?.address?.toLowerCase() || null;
   },
 });
 
