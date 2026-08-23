@@ -168,6 +168,11 @@ Eight distinct autonomous AI agents operate independently in production:
 - `POST /api/x402/verify` — Validates x402 payment signatures for resource unlocking
 - `GET /api/lepton/ask` — Public micro-oracle endpoint ($0.000001 floor price via x402)
 - `GET /api/alpha/sample` — Sample alpha feed with x402 paywall enforcement
+- `GET /api/x402/markets` — live prediction-market snapshot ($0.01 via Circle Gateway x402)
+- `GET /api/x402/research?q=…` — deep web-research pipeline on any question ($0.01/question)
+- `GET /api/x402/signals` / `/api/x402/signals/:id` — free discovery catalog of purchasable creator signals
+- `POST /api/x402/signals/:id/claim` + `GET …?payer=0x…` — external buyers unlock thesis via on-chain proof
+- `GET /api/oracle/btcnode-premium | sugra-macro | polymarket-whales` — premium oracle feeds ($0.000001–$0.000005)
 
 ### 4. Autonomous Agents & Swarm
 - `GET /api/agents/roster` — Live swarm directory, balances, strategies, and recent decisions

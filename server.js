@@ -39,6 +39,7 @@ import { registerAgentDuel } from './lib/agent_duel.js';
 import { registerAgentPnl, syncSettlementClaims } from './lib/agent_pnl.js';
 import { registerLepton } from './lib/lepton.js';
 import { registerX402Markets } from './lib/x402_markets.js';
+import { registerX402Research } from './lib/x402_research.js';
 import { registerX402Signals } from './lib/x402_signals.js';
 import { registerX402Oracles } from './lib/x402_oracles.js';
 import { registerBazaar } from './lib/bazaar.js';
@@ -392,7 +393,7 @@ app.use((req, res, next) => {
   if (STREAMING_PATHS.has(req.path) || req.headers.accept === 'text/event-stream') return next();
   // Agent chat needs longer timeout for LLM reasoning + trade execution
   // RPC proxy also gets more time for upstream node latency
-  const timeout = req.path.startsWith('/api/trade') || req.path.startsWith('/api/agent/chat') || req.path.startsWith('/api/rpc-proxy') ? 60000 : 30000;
+  const timeout = req.path.startsWith('/api/trade') || req.path.startsWith('/api/agent/chat') || req.path.startsWith('/api/rpc-proxy') || req.path.startsWith('/api/x402/research') ? 60000 : 30000;
   const timer = setTimeout(() => {
     if (!res.headersSent) {
       res.status(504).json({ error: 'Gateway timeout', path: req.path, method: req.method });
@@ -4543,6 +4544,9 @@ registerBazaar(app, { supabase });
 registerX402Markets(app, {
   fetchGamma,
 });
+
+//  x402 Research — deep web-research on any question, paid per query
+registerX402Research(app);
 
 //  x402 Signals discovery — free catalog of purchasable creator signals
 // (humans AND agents preview what Circle Pay buys; thesis stays paid-only).
