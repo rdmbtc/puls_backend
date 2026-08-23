@@ -39,6 +39,7 @@ import { registerAgentDuel } from './lib/agent_duel.js';
 import { registerAgentPnl, syncSettlementClaims } from './lib/agent_pnl.js';
 import { registerLepton } from './lib/lepton.js';
 import { registerX402Markets } from './lib/x402_markets.js';
+import { registerX402Signals } from './lib/x402_signals.js';
 import { registerX402Oracles } from './lib/x402_oracles.js';
 import { registerBazaar } from './lib/bazaar.js';
 import { registerInvest } from './lib/invest.js';
@@ -4466,6 +4467,15 @@ registerBazaar(app, { supabase });
 //  x402 Markets  buy a live market-data snapshot for $0.01 
 registerX402Markets(app, {
   fetchGamma,
+});
+
+//  x402 Signals discovery — free catalog of purchasable creator signals
+// (humans AND agents preview what Circle Pay buys; thesis stays paid-only).
+registerX402Signals(app, {
+  supabase,
+  USDC,
+  // userId → Agent/dev wallet address from the boot-loaded mapping
+  resolveAddress: (userId) => userIdToAddressCache.get(String(userId || '').toLowerCase()) || null,
 });
 
 //  Agent P&L  verifiable per-agent unit economics 
