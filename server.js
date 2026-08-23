@@ -4485,12 +4485,19 @@ registerX402Signals(app, {
   },
   // Slow path for creators missing from the boot map (SCA agents/humans):
   // wallets-table lookup → Circle getWallet. Memoized inside the module.
+  // Swarm agents store their row under walletKey "agent_" + userId.
   resolveAddressSlow: async (userId) => {
-    const { data } = await supabase
-      .from('wallets').select('wallet_id').eq('user_id', String(userId)).maybeSingle();
-    if (!data?.wallet_id) return null;
-    const res = await circle.getWallet({ id: data.wallet_id });
-    return res.data?.wallet?.address?.toLowerCase() || null;
+    const uid = String(userId);
+    const candidates = [uid, uid.startsWith('agent_swarm_') ? `agent_${uid}` : null].filter(Boolean);
+    for (const candidate of candidates) {
+      const { data } = await supabase
+        .from('wallets').select('wallet_id').eq('user_id', candidate).maybeSingle();
+      if (!data?.wallet_id) continue;
+      const res = await circle.getWallet({ id: data.wallet_id });
+      const addr = res.data?.wallet?.address?.toLowerCase() || null;
+      if (addr) return addr;
+    }
+    return null;
   },
 });
 
