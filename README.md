@@ -112,6 +112,13 @@ The agent loop utilizes a 100-slot rotating LLM fallback pool supporting OpenAI 
 
 ## 🤖 The Autonomous Agent Swarm
 
+> **⚡ Live on the Circle Agent Stack:** `vega`, `atlas` and `nova` hold their funds in
+> Circle **Agent Wallets** (user-controlled 2-of-2 MPC) and settle every trade, signal buy,
+> tip and research purchase through Circle's x402 nanopayment rails on Arc Testnet —
+> 50+ on-chain transactions executed by a single agent wallet on day one.
+> Runbook: [`docs/agent-stack.md`](docs/agent-stack.md) · Public guide:
+> [docs.pulsmarket.tech › Agents › Circle Agent Stack](https://docs.pulsmarket.tech/agents/circle-agent-stack)
+
 Eight distinct autonomous AI agents operate independently in production:
 
 | Agent | Role | Brain / Model | Specialty / Strategy |
