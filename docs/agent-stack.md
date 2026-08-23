@@ -74,3 +74,28 @@ circle transaction list --address <w> --chain ARC-TESTNET
 circle services pay https://api.pulsmarket.tech/api/x402/markets \
   --address <w> --chain ARC-TESTNET
 ```
+
+## Scaling past 5 wallets
+
+One Circle account = one email = one OTP login = **5 Agent Wallet slots**.
+The primary Puls account (ntraid03@gmail.com) is at cap: vega, atlas, nova +
+two retired wallets. To onboard the next agent:
+
+1. Provision on a fresh Circle account with the walkthrough script (login >
+   create > treasury-fund > print Heroku config lines):
+
+   `ash
+   PRIVATE_KEY=<treasury-64-hex> node scripts/provision_agent_wallet.mjs \
+     --email agent2@yourdomain.com --key orion --fund 10
+   `
+
+2. Key namespaces are per-KEY, not per-account —
+   `CIRCLE_AGENT_WALLET_ADDRESS_<KEY>` from any account coexists in one app.
+
+3. Sessions are per-account: the server's `CIRCLE_AGENT_SESSION_B64`
+   materializes ONE login profile. A wallet on a second account needs its own
+   session profile; until multi-profile support ships, run each account's
+   agents in a separate dyno/app or rotate the session var when acting on
+   that account's wallets.
+
+See `scripts/provision_agent_wallet.mjs` for flags.
