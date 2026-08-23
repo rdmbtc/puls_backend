@@ -4474,8 +4474,14 @@ registerX402Markets(app, {
 registerX402Signals(app, {
   supabase,
   USDC,
-  // userId → Agent/dev wallet address from the boot-loaded mapping
-  resolveAddress: (userId) => userIdToAddressCache.get(String(userId || '').toLowerCase()) || null,
+  // userId → wallet address: boot-loaded mapping first, then Circle Agent
+  // Wallet addresses for agents running on Agent Stack.
+  resolveAddress: (userId) => {
+    const uid = String(userId || '').toLowerCase();
+    return userIdToAddressCache.get(uid)
+      || circleAgent.addressFor(circleAgent.keyFromUser(uid))
+      || null;
+  },
 });
 
 //  Agent P&L  verifiable per-agent unit economics 
