@@ -370,6 +370,11 @@ app.get('/api/health', (req, res) => {
     circuitBreakers: {
       circle: { isOpen: circleBreaker.isOpen(), failures: circleBreaker.failures },
     },
+    agentStack: {
+      ...circleAgent.status(),
+      topupsTodayUsdc: _agentTopupSpentToday,
+      topupDailyCapUsdc: AGENT_TOPUP_DAILY_CAP_USDC,
+    },
   });
 });
 
@@ -1089,6 +1094,76 @@ const TREASURY_MIN_USDC = parseFloat(process.env.TREASURY_MIN_USDC || '10');
 const ALERT_WEBHOOK_URL = (process.env.ALERT_WEBHOOK_URL || '').trim();
 let lastTreasuryAlertAt = 0;
 const TREASURY_ALERT_COOLDOWN_MS = 30 * 60 * 1000; // at most one alert / 30 min
+
+// ── Circle Agent Wallet auto-top-up + stuck-tx watchdog ─────────────────────
+// Agents on Circle Agent Wallets burn real USDC (trades, signal buys, tips,
+// research snapshots). When an agent's balance drops below the floor, top it
+// up toward the target from the treasury — with a per-agent cooldown and a
+// global daily cap so a bug can never drain the treasury. Also raises the
+// alarm when any wallet's signing queue holds an INITIATED tx older than 45m.
+const AGENT_WALLET_FLOOR_USDC = parseFloat(process.env.AGENT_WALLET_FLOOR_USDC || '3');
+const AGENT_WALLET_TARGET_USDC = parseFloat(process.env.AGENT_WALLET_TARGET_USDC || '15');
+const AGENT_TOPUP_COOLDOWN_H = parseFloat(process.env.AGENT_TOPUP_COOLDOWN_H || '6');
+const AGENT_TOPUP_DAILY_CAP_USDC = parseFloat(process.env.AGENT_TOPUP_DAILY_CAP_USDC || '60');
+const AGENT_STALE_PENDING_MS = parseInt(process.env.AGENT_STALE_PENDING_MS || '2700000', 10); // 45 min
+const _agentTopupLastAt = new Map();   // agentKey -> ts of last topup
+let _agentTopupDayKey = new Date().toISOString().slice(0, 10);
+let _agentTopupSpentToday = 0;
+
+async function agentWalletTopUpCycle() {
+  if (!backgroundEnabled()) return;
+  if (!walletClient || !adminAccount) return;
+  const keys = String(process.env.CIRCLE_AGENT_WALLETS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  if (keys.length === 0) return;
+
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== _agentTopupDayKey) { _agentTopupDayKey = today; _agentTopupSpentToday = 0; }
+
+  for (const key of keys) {
+    try {
+      const addr = circleAgent.addressFor(key);
+      if (!addr) continue;
+
+      // Stuck-signing watchdog
+      const pend = await circleAgent.pendingSummary(addr).catch(() => null);
+      if (pend && pend.count > 0 && pend.oldestAgeMs > AGENT_STALE_PENDING_MS) {
+        console.error(`[agent-wallet:${key}] ⚠️ ${pend.count} tx(s) INITIATED for >${Math.round(pend.oldestAgeMs / 60000)}min — Circle signing pipeline degraded`);
+        captureException(new Error(`Agent wallet ${key}: ${pend.count} pending tx(s), oldest ${Math.round(pend.oldestAgeMs / 60000)}min`));
+      }
+
+      const bal = await circleAgent.usdcBalance(addr);
+      if (bal >= AGENT_WALLET_FLOOR_USDC) continue;
+      const last = _agentTopupLastAt.get(key) || 0;
+      if (Date.now() - last < AGENT_TOPUP_COOLDOWN_H * 3600_000) continue;
+      if (_agentTopupSpentToday >= AGENT_TOPUP_DAILY_CAP_USDC) {
+        console.warn(`[agent-wallet:${key}] needs top-up but daily cap ${AGENT_TOPUP_DAILY_CAP_USDC} reached`);
+        continue;
+      }
+      const treasury = await getTreasuryUsdcBalance();
+      if (treasury == null || treasury < TREASURY_MIN_USDC + 1) {
+        console.warn(`[agent-wallet:${key}] treasury too low (${treasury}) for top-up`);
+        continue;
+      }
+      const amount = Math.max(0, Math.round((AGENT_WALLET_TARGET_USDC - bal) * 100) / 100);
+      if (amount <= 0) continue;
+
+      await walletClient.writeContract({
+        address: USDC,
+        abi: [{ name: 'transfer', type: 'function', stateMutability: 'nonpayable',
+          inputs: [{ name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }], outputs: [] }],
+        functionName: 'transfer',
+        args: [addr, BigInt(Math.round(amount * 1_000_000))],
+      });
+      _agentTopupLastAt.set(key, Date.now());
+      _agentTopupSpentToday += amount;
+      console.log(`[agent-wallet:${key}] auto-topup +${amount} USDC (bal was ${bal.toFixed(2)}, treasury ${treasury.toFixed(0)})`);
+    } catch (e) {
+      console.warn(`[agent-wallet:${key}] topup cycle error:`, e.message);
+    }
+  }
+}
+safeInterval('agentWalletTopUp', agentWalletTopUpCycle, 5 * 60 * 1000);
 
 async function sendAlert(text) {
   console.warn(`[ALERT] ${text}`);
