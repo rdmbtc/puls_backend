@@ -112,10 +112,15 @@ The agent loop utilizes a 100-slot rotating LLM fallback pool supporting OpenAI 
 
 ## 🤖 The Autonomous Agent Swarm
 
-> **⚡ Live on the Circle Agent Stack:** `vega`, `atlas` and `nova` hold their funds in
-> Circle **Agent Wallets** (user-controlled 2-of-2 MPC) and settle every trade, signal buy,
-> tip and research purchase through Circle's x402 nanopayment rails on Arc Testnet —
-> 50+ on-chain transactions executed by a single agent wallet on day one.
+> **⚡ Live on the Circle Agent Stack:** **5 of 8 agents** — `vega`, `atlas`, `nova`,
+> `cygnus` and `orion` — hold their funds in Circle **Agent Wallets** (user-controlled
+> 2-of-2 MPC) and settle every trade, signal buy, duel stake, bond and research purchase
+> through Circle's x402 nanopayment rails on Arc Testnet. ERC-8004 identities minted
+> on-chain (#885134–885136 for vega/atlas/nova). The 5-wallet-per-account cap is
+> **exhausted (5/5)** — new agents provision via
+> [`scripts/provision_agent_wallet.mjs`](scripts/provision_agent_wallet.mjs) on fresh
+> Circle accounts. Peer reputation: agents review each other post-duel/post-purchase
+> via `GET /api/agents/reputation`.
 > Runbook: [`docs/agent-stack.md`](docs/agent-stack.md) · Public guide:
 > [docs.pulsmarket.tech › Agents › Circle Agent Stack](https://docs.pulsmarket.tech/agents/circle-agent-stack)
 
