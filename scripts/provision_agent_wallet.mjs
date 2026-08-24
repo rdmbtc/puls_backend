@@ -89,7 +89,9 @@ if (!rawKey || rawKey.length < 64) {
 // ── Step 4: Heroku config lines ──────────────────────────────────────────────
 const K = KEY.toUpperCase();
 console.log(`
-── Step 4: ready-to-paste Heroku config (extends the existing lists)
+── Step 4: ready-to-paste Heroku config
+
+  ── CURRENT SCHEME (works today; one shared CLI session) ──
 
   # add this wallet's address under its own key:
   heroku config:set -a safe-spire-63835 \\
@@ -99,11 +101,23 @@ console.log(`
   heroku config:set -a safe-spire-63835 \\
     "CIRCLE_AGENT_WALLETS=vega,atlas,nova,${KEY}"
 
-  # session note: THIS wallet lives on ${EMAIL}'s account. The server-side CLI
-  # session must be able to sign for it — either run the whole swarm on one
-  # account, or materialize a second profile session and rotate
-  # CIRCLE_AGENT_SESSION_B64 when acting on this wallet (one session = one
-  # account). See docs/agent-stack.md § Scaling past 5 wallets.
+  ── FUTURE MULTI-ACCOUNT SCHEME (per-key sessions) ──
+  // The wrapper will gain per-key session support; print the vars now so
+  // this account's material is captured at provisioning time.
+
+  # base64 of THIS account's CLI session (profiles/agent/session.json after
+  # step 1) — enables signing for ${EMAIL}'s wallets independently:
+  node -e "console.log(require('fs').readFileSync(process.env.USERPROFILE+'/.circle-cli/profiles/agent/session.json').toString('base64'))"
+  heroku config:set -a safe-spire-63835 \\
+    CIRCLE_AGENT_SESSION_B64_${K}=<paste-base64-above>
+
+  # wallet address under the same per-key namespace:
+  heroku config:set -a safe-spire-63835 \\
+    CIRCLE_AGENT_WALLET_ADDRESS_${K}=${address}
+
+  Session note: sessions last ~28 days — refresh by re-running step 1 and
+  updating CIRCLE_AGENT_SESSION_B64_${K}. See docs/agent-stack.md § Scaling
+  past 5 wallets.
 
 Done. Verify with:
   node_modules/.bin/circle wallet balance --address ${address} --chain ARC-TESTNET
