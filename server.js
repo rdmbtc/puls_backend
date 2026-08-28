@@ -236,8 +236,8 @@ const PUBLIC_CACHE_RULES = [
   [/^\/api\/market\/(info|resolution-status|price-history)\/?$/, 12],
   [/^\/api\/market\/insight\/?$/, 30],
   [/^\/api\/trade\/recent\/?$/, 5],
-  [/^\/api\/stats\/?$/, 20],
-  [/^\/api\/live\/?$/, 10],
+  [/^\/api\/stats\/?$/, 5],
+  [/^\/api\/live\/?$/, 5],
   [/^\/api\/economy\/feed\/?$/, 15],
   [/^\/api\/agents\/(roster|feed|bonds|house)\/?$/, 15],
   [/^\/api\/oracle\//, 15],
@@ -511,9 +511,10 @@ const authenticateUser = async (req, res, next) => {
     }
     req.user = user;
     
-    const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_')))
+    const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_') || user.id.startsWith('eth_')))
       ? user.id
       : `supabase_${user.id}`;
+    req.user.id = expectedUserId;
     if (requestedUserId && requestedUserId !== expectedUserId) {
       console.warn(`[Auth Notice] UserId mismatch. Authenticated: ${expectedUserId}, Requested: ${requestedUserId}. Overriding to authenticated identity.`);
     }
@@ -571,9 +572,10 @@ const optionalAuth = async (req, res, next) => {
 
     if (user) {
       req.user = user;
-      const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_')))
+      const expectedUserId = (typeof user.id === 'string' && (user.id.startsWith('supabase_') || user.id.startsWith('google_') || user.id.startsWith('eth_')))
         ? user.id
         : `supabase_${user.id}`;
+      req.user.id = expectedUserId;
       if (req.query) req.query.userId = expectedUserId;
       if (req.body) req.body.userId = expectedUserId;
     }
@@ -812,11 +814,14 @@ app.get('/api/auth/google/callback', async (req, res) => {
         user_metadata: { full_name: finalDisplayName, avatar_url: finalAvatarUrl },
       });
 
-    // One-time handoff via HttpOnly cookie on .pulsmarket.tech, then redirect
-    // to a clean URL. Keeps the JWT out of the query string where edge
-    // firewalls (Vercel) can 403 the page before Flutter even starts.
+    // One-time handoff via HttpOnly cookie on .pulsmarket.tech, PLUS hash fragment fallback
+    // for Safari ITP / Brave / mobile webviews where 3rd-party/cross-origin cookies might be blocked.
+    // Hash fragments (#) stay purely on the client so edge firewalls (Vercel) never see them.
     res.cookie(PULS_COOKIE, `${userId}|${token}`, pulsCookieOpts);
-    res.redirect('https://app.pulsmarket.tech/');
+    statsCache.data = null;
+    statsCache.ts = 0;
+    cacheDel('v1:/api/stats').catch(() => {});
+    res.redirect(`https://app.pulsmarket.tech/#auth_token=${encodeURIComponent(token)}&user_id=${encodeURIComponent(userId)}`);
   } catch (err) {
     console.error('[Google OAuth Error]:', err.message);
     res.redirect('https://app.pulsmarket.tech/?error=auth_error');
@@ -2217,6 +2222,52 @@ app.post('/api/rpc-proxy', rpcProxyLimiter, async (req, res) => {
   }
 });
 
+// POST /api/wallet/connect-external — records external Web3 (MetaMask / browser) wallet in Postgres
+app.post('/api/wallet/connect-external', strictLimiter, async (req, res) => {
+  try {
+    const { address, userId } = req.body;
+    if (!address || typeof address !== 'string') {
+      return res.status(400).json({ error: 'Valid Ethereum address required' });
+    }
+    const normAddr = address.toLowerCase();
+    const normUserId = (userId && typeof userId === 'string') ? userId : `eth_${normAddr}`;
+
+    // Upsert into wallets table
+    await supabase.from('wallets').upsert({
+      user_id: normUserId,
+      wallet_id: `ext_${normAddr}`,
+      address: normAddr,
+      last_balance: '0'
+    }, { onConflict: 'user_id' });
+
+    // Upsert into profiles table if not existing
+    const { data: existingProf } = await supabase
+      .from('profiles')
+      .select('user_id')
+      .eq('user_id', normUserId)
+      .maybeSingle();
+
+    if (!existingProf) {
+      const shortAddr = `${normAddr.slice(0, 6)}...${normAddr.slice(-4)}`;
+      await supabase.from('profiles').insert({
+        user_id: normUserId,
+        display_name: shortAddr,
+        avatar_url: `https://api.dicebear.com/7.x/identicon/png?size=128&seed=${normAddr}`,
+        bio: 'Web3 Trader on Arc Testnet.'
+      });
+    }
+
+    // Invalidate stats cache immediately so traction counters refresh in real-time
+    statsCache.data = null;
+    statsCache.ts = 0;
+    cacheDel('v1:/api/stats').catch(() => {});
+
+    res.json({ ok: true, userId: normUserId, address: normAddr });
+  } catch (e) {
+    safeErrorResponse(res, e);
+  }
+});
+
 // POST /api/wallet/get-or-create
 const _userWalletCreating = new Set();
 app.post('/api/wallet/get-or-create', apiKeyOrAuth, requireVerifiedUser, strictLimiter, async (req, res) => {
@@ -3452,6 +3503,22 @@ app.post('/api/trade/save-external', tradeLimiter, async (req, res) => {
       state: 'COMPLETE',
       tx_hash: txHash,
     });
+
+    // Ensure external wallet & profile exist in database
+    const senderAddr = receipt.from.toLowerCase();
+    const normUserId = userId.startsWith('eth_') ? userId : `eth_${senderAddr}`;
+    await supabase.from('wallets').upsert({
+      user_id: normUserId,
+      wallet_id: `ext_${senderAddr}`,
+      address: senderAddr,
+      last_balance: '0'
+    }, { onConflict: 'user_id' }).catch(() => {});
+
+    // Invalidate stats cache immediately so traction counters refresh in real-time
+    statsCache.data = null;
+    statsCache.ts = 0;
+    cacheDel('v1:/api/stats').catch(() => {});
+
     res.json({ ok: true });
   } catch (e) {
     safeErrorResponse(res, e);
@@ -3956,10 +4023,10 @@ function quantInsight(slug, ctx) {
 
 //  Protocol Stats 
 let statsCache = { data: null, ts: 0 };
-const STATS_TTL_MS = 60 * 1000;
+const STATS_TTL_MS = 5 * 1000;
 
 // GET /api/stats  public protocol-level numbers for the landing page
-app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
+app.get('/api/stats', cacheMiddleware(5, 'v1'), async (req, res) => {
   try {
     if (statsCache.data && Date.now() - statsCache.ts < STATS_TTL_MS) {
       return res.json(statsCache.data);
@@ -3974,13 +4041,33 @@ app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
     const rpcOk = Object.keys(stats).length > 0;
 
     // Only run extra queries if RPC didn't return them
-    const [marketsRes, resolvedRes, usersRes, payCountRes, countRes] = rpcOk ? [{}, {}, {}, {}, {}] : await Promise.all([
+    const [marketsRes, resolvedRes, payCountRes, countRes] = rpcOk ? [{}, {}, {}, {}] : await Promise.all([
       supabase.from('deployed_markets').select('*', { count: 'exact', head: true }),
       supabase.from('deployed_markets').select('*', { count: 'exact', head: true }).eq('resolved', true),
-      supabase.from('wallets').select('*', { count: 'exact', head: true }),
       supabase.from('x402_payments').select('*', { count: 'exact', head: true }),
       supabase.from('trades').select('*', { count: 'exact', head: true }).eq('state', 'COMPLETE'),
     ]);
+
+    // Accurate total unique human users count across wallets, profiles, and trades
+    let userCount = Number(stats.users || 0);
+    try {
+      if (supabase.pool) {
+        const { rows: uRows } = await supabase.pool.query(`
+          SELECT COUNT(DISTINCT user_id) as count FROM (
+            SELECT user_id FROM wallets WHERE user_id NOT LIKE 'agent_%' AND user_id != 'house_pulse'
+            UNION
+            SELECT user_id FROM profiles WHERE user_id NOT LIKE 'agent_%' AND user_id != 'house_pulse'
+            UNION
+            SELECT user_id FROM trades WHERE user_id NOT LIKE 'agent_%' AND user_id != 'house_pulse'
+          ) u;
+        `);
+        if (uRows && uRows[0]?.count) {
+          userCount = parseInt(uRows[0].count, 10);
+        }
+      }
+    } catch (_) {
+      if (!userCount) userCount = Number(stats.users || 0);
+    }
 
     const tradeCount = Number(stats.trade_count || countRes.count || 0);
     const volumeUsdc = Number(stats.volume_usdc || 0);
@@ -4013,7 +4100,7 @@ app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
       totalVolumeUsdc: r2(volumeUsdc),
       marketsDeployed: Number(stats.markets || marketsRes.count || 0),
       marketsResolved: Number(stats.markets_resolved || resolvedRes.count || 0),
-      users: Number(stats.users || usersRes.count || 0),
+      users: userCount,
       humanTrades: Math.max(0, tradeCount - agentTrades - seedTrades),
       agentTrades,
       agents: agentCount,
@@ -4030,6 +4117,23 @@ app.get('/api/stats', cacheMiddleware(60, 'v1'), async (req, res) => {
     console.error('stats error:', e.message);
     safeErrorResponse(res, e);
   }
+});
+
+// Auto-invalidate stats cache on trade and wallet events for real-time live traction
+eventBus.on(EVENTS.TRADE_COMPLETE, () => {
+  statsCache.data = null;
+  statsCache.ts = 0;
+  cacheDel('v1:/api/stats').catch(() => {});
+});
+eventBus.on(EVENTS.TRADE_CREATED, () => {
+  statsCache.data = null;
+  statsCache.ts = 0;
+  cacheDel('v1:/api/stats').catch(() => {});
+});
+eventBus.on(EVENTS.WALLET_CREATED, () => {
+  statsCache.data = null;
+  statsCache.ts = 0;
+  cacheDel('v1:/api/stats').catch(() => {});
 });
 
 //  GET /api/live  lightweight, poll-every-second counters for Puls Explorer 
@@ -6237,7 +6341,9 @@ app.post('/api/profile/update', authenticateUser, strictLimiter, async (req, res
     if (!userId) return res.status(400).json({ error: 'userId required' });
 
     if (req.user) {
-      const expectedUserId = `supabase_${req.user.id}`;
+      const expectedUserId = (typeof req.user.id === 'string' && (req.user.id.startsWith('supabase_') || req.user.id.startsWith('google_') || req.user.id.startsWith('eth_')))
+        ? req.user.id
+        : `supabase_${req.user.id}`;
       if (userId !== expectedUserId) {
         return res.status(403).json({ error: 'Forbidden: User identity mismatch' });
       }
