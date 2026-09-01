@@ -727,14 +727,19 @@ const USDC = '0x3600000000000000000000000000000000000000';
 
 // ── DIRECT GOOGLE OAUTH (Bypassing Supabase Egress Restriction) ────────────
 app.get('/api/auth/google', (req, res) => {
-  const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
-  if (!clientId) {
-    return res.status(400).send('GOOGLE_CLIENT_ID is not configured on server.');
+  try {
+    const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+    if (!clientId) {
+      return res.status(400).send('GOOGLE_CLIENT_ID is not configured on server.');
+    }
+    const redirectUri = encodeURIComponent('https://api.pulsmarket.tech/api/auth/google/callback');
+    const scope = encodeURIComponent('openid email profile');
+    const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&prompt=select_account`;
+    res.redirect(googleAuthUrl);
+  } catch (err) {
+    console.error('[Google OAuth Init Error]:', err.message);
+    safeErrorResponse(res, err);
   }
-  const redirectUri = encodeURIComponent('https://api.pulsmarket.tech/api/auth/google/callback');
-  const scope = encodeURIComponent('openid email profile');
-  const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&prompt=select_account`;
-  res.redirect(googleAuthUrl);
 });
 
 app.get('/api/auth/google/callback', async (req, res) => {
