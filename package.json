@@ -23,7 +23,7 @@
     "@circle-fin/developer-controlled-wallets": "^10.3.1",
     "@circle-fin/user-controlled-wallets": "^10.3.1",
     "@circle-fin/x402-batching": "^2.0.4",
-    "@composio/core": "^0.14.0",
+    "@composio/core": "^0.18.0",
     "@google/genai": "^2.15.0",
     "@opensearch-project/opensearch": "^3.6.0",
     "@sentry/node": "^10.66.0",
